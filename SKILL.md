@@ -36,14 +36,14 @@ quantSkills:
   - cursor
   status: stable
   validation_level: runnable
-  maintainer_type: official
+  maintainer_type: community
   summary_zh: 输入一组候选标的，输出一份可复现的统计套利研究报告：配对筛选、训练窗协整与平稳性检验、价差均值回归与对冲比率稳定性、信号构建、含融券成本与
     Sharpe 显著性的带偏差控制回测，一次验真伪。
   summary_en: A statistical-arbitrage skill that screens pairs, tests cointegration
     on the training window (ADF + KPSS), models spread mean-reversion and hedge-ratio
     stability, builds z-score signals, and runs a bias-controlled backtest with
     realistic costs and Sharpe significance to judge whether an apparent edge is real.
-  license: GPL-3.0
+  license: GPL-3.0-only
   requires: []
 ---
 
