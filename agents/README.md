@@ -9,7 +9,7 @@
   <img alt="report sections" src="https://img.shields.io/badge/report_sections-9-blue">
   <img alt="robustness rules" src="https://img.shields.io/badge/robustness_rules-14-red">
   <img alt="implemented tests" src="https://img.shields.io/badge/script_tests-ADF·KPSS·half--life·βdrift·SharpeT-ff69b4">
-  <img alt="data" src="https://img.shields.io/badge/data-akshare|yfinance-7c3aed">
+  <img alt="data" src="https://img.shields.io/badge/data-zeus_MCP-7c3aed">
   <img alt="license" src="https://img.shields.io/badge/license-GPLv3-blue">
 </p>
 
@@ -21,7 +21,7 @@
 
 它最核心的能力是**判断"表观优势"是真是假**：漂亮的样本外净值曲线一文不值，除非它① Sharpe 的 t 统计量足够大（与 0 可区分）、② 没有前视泄漏、③ 扛得过含融券 carry 的真实成本、④ 不是把方向性 beta 当成 alpha。本技能默认抱持怀疑，主动设计实验去**证伪**而非印证；当证据只是"指示性"时，明说"需继续证伪"，不下可交易结论。
 
-> 原始行情数据由内置脚本 [`scripts/run_statarb.py`](../scripts/run_statarb.py) 的 `load_prices()` 直接拉取（A股用 `akshare`，美股用 `yfinance`），本技能自洽可装、无外部技能依赖。统计计算优先用 `statsmodels`；无网/无库时脚本退化为 numpy 近似仅供自测，真实研究请装 `statsmodels` 取精确 p 值。
+> 行情数据只来自 **zeus MCP**（期货日线 `fut_daily`）：内置脚本 [`scripts/run_statarb.py`](../scripts/run_statarb.py) 用 `--fetch` 调 MCP，把响应原样存成不可变快照，再离线回放生成报告与 `manifest.json`；不接第三方数据源、不直连数据库。统计计算优先用 `statsmodels`；无网/无库时脚本退化为 numpy 近似仅供自测，真实研究请装 `statsmodels` 取精确 p 值。
 
 ---
 
@@ -49,7 +49,7 @@ flowchart LR
 
 | 阶段 | 方法/检验 | 回答什么 |
 |---|---|---|
-| 🧹 **数据处理** | 行情加载（akshare·yfinance）· 交易日对齐 · 对数价 · 收益序列 · 缺口/异常审计 | 序列干净、对齐、同币种吗？对齐后可用样本多少？ |
+| 🧹 **数据处理** | zeus MCP 快照（fut_daily）· 交易日对齐 · 对数价 · 收益序列 · 缺口/异常审计 | 序列干净、对齐、同币种吗？对齐后可用样本多少？ |
 | 🔎 **配对筛选** | 相关性筛选 · 行业/聚类过滤 · 距离法(SSD) · 初步协整扫描 | 哪些标的经济上相关、值得正式检验？筛了多少对（多重检验暴露）？ |
 | 🧪 **协整与平稳性** | **训练窗** `adfuller` + `kpss`（对偶零假设）· Engle-Granger/Johansen（Agent 补充） | 真的存在可交易平稳价差吗？相关 ≠ 协整。检验只用训练窗，防前视。 |
 | 📐 **价差建模** | OLS 对冲比率（仅训练窗）· **分段/滚动 β 稳定性** · AR(1) 半衰期 | 价差怎么构造？对冲比率稳吗（会漂移吗）？回归多快？ |
@@ -102,8 +102,8 @@ flowchart TD
 ### 1️⃣ 安装
 
 ```bash
-# 安装运行依赖（A股用 akshare；美股把 akshare 换成 yfinance）
-pip install statsmodels akshare pandas numpy scipy
+# 安装运行依赖（取数走 zeus MCP，仅用标准库 HTTP，无需额外数据包）
+pip install statsmodels pandas numpy scipy
 
 # Claude Code（全局）
 cp -r skill-statistical-arbitrage-time-series   ~/.claude/skills/statistical-arbitrage-time-series
@@ -119,7 +119,8 @@ cp -r skill-statistical-arbitrage-time-series   .cursor/skills/statistical-arbit
 
 > 也可不经 Agent 直接跑脚本验证（含离线自测，无需联网）：
 > ```bash
-> python scripts/run_statarb.py --a 600519.SH --b 000858.SZ --source akshare --start 2020-01-01
+> export ZEUS_MCP_URL=http://<host>:8000/mcp ZEUS_MCP_TOKEN=<token>
+> python scripts/run_statarb.py --config run1/config.json --fetch --out-dir run1   # zeus 取数 + 回放
 > # 五种分支自测（合成数据，覆盖每条裁决路径）：
 > python scripts/run_statarb.py --source synthetic --mode strong      # 🟢 绿灯：可进一步研究
 > python scripts/run_statarb.py --source synthetic --mode coint       # 🟡 协整但证据不足（慢回归）
@@ -169,7 +170,7 @@ Statistical Arbitrage & Time Series Modeling/
 
 | 约束 | 说明 |
 |---|---|
-| 🧾 取数自洽 | 行情由内置 `run_statarb.py`（akshare/yfinance）拉取，不发明接口；统计计算用 statsmodels/numpy/pandas |
+| 🧾 取数自洽 | 行情只经 zeus MCP 取得并存为不可变快照，可复跑、可审计，不发明接口；统计计算用 statsmodels/numpy/pandas |
 | 🧮 公式透明 | 对冲比率、ADF/KPSS、半衰期、z-score、Sharpe **及其 t 统计量**、扣费收益等衍生指标须写出公式与序列名 |
 | 🧪 协整必检（训练窗） | 相关 ≠ 协整；ADF+KPSS 仅在训练窗价差上做标题判定，全样本/样本外仅作对照，绝不默认成立 |
 | 🚪 样本外隔离 | 对冲比率与所有阈值仅在训练窗估计，留出最近约 30% 作样本外；同时检查"样本内外倒挂"与过拟合两种失败模式 |

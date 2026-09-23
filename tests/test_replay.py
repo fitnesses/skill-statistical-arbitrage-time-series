@@ -16,9 +16,10 @@ def sha256(p):
 
 @pytest.fixture
 def case(tmp_path, monkeypatch):
-    """Copy fixtures into tmp so tests can mutate them; block live data libs."""
-    for name in ("akshare", "yfinance"):
-        monkeypatch.setitem(sys.modules, name, None)   # any import -> ImportError
+    """Copy fixtures into tmp so tests can mutate them; any network call fails."""
+    def no_network(*a, **k):
+        raise AssertionError("replay must not query live data")
+    monkeypatch.setattr("urllib.request.urlopen", no_network)
     for f in FIX.iterdir():
         shutil.copy(f, tmp_path / f.name)
     return tmp_path

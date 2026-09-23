@@ -23,8 +23,9 @@ ADF/KPSS 统计量、半衰期、对冲比率稳定性、样本外 Sharpe 及其
   9. 半衰期公式与 guide 对齐：half-life = -ln2 / ln(1+b)。
 
 两条路径：
-  - 研究路径：数据只来自 zeus MCP。Agent 调 fut_daily 把响应落成快照 JSON，
-    脚本用 --config 离线回放，输出 report.md + manifest.json；统计优先用 statsmodels。
+  - 研究路径：数据只来自 zeus MCP（期货行情，DolphinDB 在 MCP 之后，脚本不直连）。
+    --fetch 按配置调 fut_daily，把响应原样写成快照 JSON；随后（或任何时候）用
+    --config 离线回放，输出 report.md + manifest.json；统计优先用 statsmodels。
   - 自测路径（无数据/无 statsmodels）：--source synthetic，ADF/KPSS 用本文件内置的
     numpy 实现（近似，仅供机器自测）；真实研究请装 statsmodels 用其精确 p 值。
 
@@ -34,12 +35,12 @@ Johansen、Kalman 动态对冲、Chow/CUSUM、滚动前推(walk-forward)、价�
 请勿在报告里把它们写成"已自动完成"。
 
 用法示例：
-  python run_statarb.py --source synthetic --cointegrated 1      # 离线自测：协整对
-  python run_statarb.py --source synthetic --cointegrated 0      # 离线自测：非协整对
-  python run_statarb.py --config tests/fixtures/replay_config.json --out-dir run1
-      # 回放：研究配置 + 固定 MCP 快照 → report.md + manifest.json（不取实时数据）
+  export ZEUS_MCP_URL=http://<host>:8000/mcp ZEUS_MCP_TOKEN=<token>
+  python run_statarb.py --config run1/config.json --fetch --out-dir run1   # 取数 + 回放
+  python run_statarb.py --config run1/config.json --out-dir run1b          # 仅回放已有快照
+  python run_statarb.py --source synthetic --mode strong                   # 离线自测
 """
-import argparse, datetime as dt, hashlib, json, subprocess, sys
+import argparse, datetime as dt, hashlib, json, os, subprocess, sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -53,8 +54,8 @@ except Exception:
 
 
 # ============ 1. 数据层 ============
-# 真实行情只经 zeus MCP 获取：Agent 调 fut_daily 落成快照 JSON，再用 --config 回放
-# （见 replay()）。脚本本身不联网、不直连数据库；合成数据仅供离线自测。
+# 真实行情只经 zeus MCP 获取：fetch_snapshot() 调 fut_daily 落成快照 JSON，
+# replay() 只读快照；不直连数据库。合成数据仅供离线自测。
 COST_DEFAULTS = {"commission_bps": 5.0, "stamp_duty_bps": 5.0, "borrow_annual_bps": 800.0}
 
 
@@ -730,6 +731,122 @@ def _git_version():
         return {"git_commit": None, "git_dirty": None}
 
 
+# ============ 取数：zeus MCP（Streamable HTTP, JSON-RPC）→ 快照 ============
+class ZeusError(RuntimeError):
+    """zeus MCP 连接/鉴权/工具调用失败，或返回空数据。"""
+
+
+class ZeusClient:
+    """最小 MCP 客户端（仅标准库）：initialize → notifications/initialized → tools/call。
+    ponytail: 只实现 zeus 需要的请求-应答；无流式通知/重连，需要时换官方 mcp SDK。"""
+
+    def __init__(self, url, token=None, timeout=120):
+        self.url, self.token, self.timeout = url, token, timeout
+        self.session = None
+        self._id = 0
+        init = self._rpc("initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
+                                        "clientInfo": {"name": "run_statarb", "version": "1"}})
+        self.server_info = init.get("serverInfo", {})
+        self._rpc("notifications/initialized", notify=True)
+
+    def _rpc(self, method, params=None, notify=False):
+        import urllib.request, urllib.error
+        msg = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            msg["params"] = params
+        if not notify:
+            self._id += 1
+            msg["id"] = self._id
+        headers = {"Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        if self.session:
+            headers["Mcp-Session-Id"] = self.session
+        req = urllib.request.Request(self.url, json.dumps(msg).encode(), headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                self.session = r.headers.get("Mcp-Session-Id") or self.session
+                body = r.read().decode("utf-8")
+                ctype = r.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as e:
+            raise ZeusError(f"zeus {method}: HTTP {e.code} {e.reason}") from e
+        except (urllib.error.URLError, OSError) as e:
+            raise ZeusError(f"zeus {method}: cannot reach {self.url}: {e}") from e
+        if notify:
+            return None
+        if "text/event-stream" in ctype:   # SSE：取与本请求 id 对应的 data 行
+            msgs = [json.loads(l[5:]) for l in body.splitlines() if l.startswith("data:")]
+            resp = next((m for m in msgs if m.get("id") == msg["id"]), None)
+        else:
+            resp = json.loads(body) if body else None
+        if resp is None:
+            raise ZeusError(f"zeus {method}: no response for request id {msg['id']}")
+        if "error" in resp:
+            raise ZeusError(f"zeus {method}: {resp['error']}")
+        return resp["result"]
+
+    def call(self, tool, args):
+        """调用工具，返回行列表（FastMCP 把 list 返回拆成每行一个 text 项）。"""
+        res = self._rpc("tools/call", {"name": tool, "arguments": args})
+        texts = [c.get("text", "") for c in res.get("content", []) if c.get("type") == "text"]
+        if res.get("isError"):
+            raise ZeusError(f"zeus {tool}{args}: {' '.join(texts)}")
+        rows = []
+        for t in texts:
+            v = json.loads(t)
+            rows.extend(v if isinstance(v, list) else [v])
+        return rows
+
+
+def _legs(cfg):
+    legs = cfg["legs"]
+    if not (isinstance(legs, list) and len(legs) == 2 and all(isinstance(x, str) for x in legs)):
+        raise ReplayInputError(f"config: 'legs' must be two ts_code strings, got {legs!r}")
+    return legs
+
+
+def _check_yyyymmdd(v, where):
+    if not (isinstance(v, str) and len(v) == 8 and v.isdigit()):
+        raise ReplayInputError(f"{where} must be YYYYMMDD, got {v!r}")
+
+
+def fetch_snapshot(config_path, url, token=None):
+    """按配置（legs + start_date/end_date）调 zeus fut_daily，原样写快照到 config['snapshot']。
+    快照不可变：目标已存在则拒绝覆盖；任一腿失败/为空则不写文件。"""
+    config_path = Path(config_path)
+    cfg = _read_json(config_path, "config")
+    _require(cfg, ("snapshot", "legs", "start_date", "end_date"), "config")
+    for k in ("start_date", "end_date"):
+        _check_yyyymmdd(cfg[k], f"config: '{k}'")
+    snap_path = config_path.parent / cfg["snapshot"]
+    if snap_path.exists():
+        raise ReplayInputError(f"snapshot {snap_path} already exists; 快照不可变，请换文件名")
+
+    client = ZeusClient(url, token)
+    calls = []
+    for leg in _legs(cfg):
+        params = {"ts_code": leg, "start_date": cfg["start_date"], "end_date": cfg["end_date"]}
+        retrieved_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            rows = client.call("fut_daily", params)
+        except ZeusError as e:
+            raise ZeusError(f"{leg}: {e}") from e
+        if not rows:
+            raise ZeusError(f"{leg}: fut_daily returned no rows for "
+                            f"{cfg['start_date']}~{cfg['end_date']}（合约代码/区间？MCP 缺数据？）")
+        calls.append({"tool": "fut_daily", "params": params,
+                      "retrieved_at": retrieved_at, "rows": rows})
+
+    info = client.server_info
+    snap = {"snapshot_version": 1,
+            "server": info.get("name", "zeus"), "server_version": info.get("version"),
+            "provenance": f"{info.get('name', 'zeus')} MCP fut_daily（原样响应）",
+            "calls": calls}
+    snap_path.write_text(json.dumps(snap, ensure_ascii=False, indent=1), encoding="utf-8")
+    return snap
+
+
 def _lib_versions():
     import platform
     v = {"python": platform.python_version(), "numpy": np.__version__, "pandas": pd.__version__}
@@ -747,9 +864,7 @@ def replay(config_path, out_dir):
     config_path, out_dir = Path(config_path), Path(out_dir)
     cfg = _read_json(config_path, "config")
     _require(cfg, ("snapshot", "legs"), "config")
-    legs = cfg["legs"]
-    if not (isinstance(legs, list) and len(legs) == 2 and all(isinstance(x, str) for x in legs)):
-        raise ReplayInputError(f"config: 'legs' must be two ts_code strings, got {legs!r}")
+    legs = _legs(cfg)
     field = cfg.get("price_field", "close")
     if not isinstance(field, str):
         raise ReplayInputError(f"config: 'price_field' must be a string, got {field!r}")
@@ -808,7 +923,9 @@ def replay(config_path, out_dir):
 def main():
     sys.stdout.reconfigure(errors="replace")   # gbk 控制台打印 emoji 不崩
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", help="回放：研究配置 JSON（含 zeus MCP 快照路径），不取实时数据")
+    ap.add_argument("--config", help="研究配置 JSON（legs、快照路径、start_date/end_date、成本）")
+    ap.add_argument("--fetch", action="store_true",
+                    help="先从 zeus MCP 取数写快照（需环境变量 ZEUS_MCP_URL，可选 ZEUS_MCP_TOKEN），再回放")
     ap.add_argument("--out-dir", default="statarb_run", help="回放输出目录")
     ap.add_argument("--source", default="synthetic", choices=["synthetic"],
                     help="无 --config 时仅支持合成数据自测；真实数据请用 --config 回放 MCP 快照")
@@ -824,9 +941,19 @@ def main():
 
     if args.config:
         try:
+            if args.fetch:
+                url = os.environ.get("ZEUS_MCP_URL")
+                if not url:
+                    raise SystemExit("[fetch] 请设置环境变量 ZEUS_MCP_URL（如 http://host:8000/mcp），"
+                                     "鉴权 token 放 ZEUS_MCP_TOKEN")
+                snap = fetch_snapshot(args.config, url, os.environ.get("ZEUS_MCP_TOKEN"))
+                print(f"[fetch] {snap['server']} {snap['server_version']}: "
+                      + ", ".join(f"{c['params']['ts_code']}={len(c['rows'])} rows" for c in snap["calls"]))
             m = replay(args.config, args.out_dir)
         except ReplayInputError as e:
-            raise SystemExit(f"[replay input error] {e}")
+            raise SystemExit(f"[input error] {e}")
+        except ZeusError as e:
+            raise SystemExit(f"[zeus error] {e}")
         print(f"[done] replay run_id={m['run_id']} -> {args.out_dir}")
         return
 

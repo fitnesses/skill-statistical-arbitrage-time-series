@@ -16,7 +16,7 @@ The single job of this skill is to decide **whether an apparent edge is real or 
 
 Be honest in the report about provenance. `scripts/run_statarb.py` implements:
 
-- price load (akshare/yfinance/synthetic), calendar alignment, log prices, usable-sample reporting;
+- price load (zeus MCP `fut_daily` snapshot, or synthetic for self-test), calendar alignment, log prices, usable-sample reporting;
 - OLS hedge ratio on the **training window only**, AR(1) half-life;
 - **chunk-wise β** as a cheap structural-stability proxy;
 - ADF + KPSS, run on the **training-window spread** for the headline decision (full-sample and OOS shown only as a cross-check);
@@ -26,7 +26,7 @@ Be honest in the report about provenance. `scripts/run_statarb.py` implements:
 
 The following are **NOT** in the script and must be added by the agent when the question warrants, and must never be reported as "automatically done": Johansen cointegration, Kalman/dynamic hedge ratio, a full Chow/CUSUM break-test suite, and true walk-forward re-estimation. If the agent did not run them, say "未做" with the reason.
 
-**Now implemented in the script** (previously agent-only): factor attribution at two levels — (a) the strategy's OOS net PnL regressed on a market proxy (reports market β, residual α, and their t-stats; insignificant residual α flags an edge that may be leaked beta), and (b) the spread's daily returns regressed on the market proxy (market-neutrality check that directly addresses the low-hedge-ratio / co-moving-legs concern). The market proxy is CSI300 (`sh000300`) for akshare, SPY for yfinance, and an independent synthetic factor in self-test mode; if no proxy is available the report states attribution was not done.
+**Now implemented in the script** (previously agent-only): factor attribution at two levels — (a) the strategy's OOS net PnL regressed on a market proxy (reports market β, residual α, and their t-stats; insignificant residual α flags an edge that may be leaked beta), and (b) the spread's daily returns regressed on the market proxy (market-neutrality check that directly addresses the low-hedge-ratio / co-moving-legs concern). The market proxy is an independent synthetic factor in self-test mode; zeus MCP runs currently have no market proxy, so attribution is reported as not done; if no proxy is available the report states attribution was not done.
 
 ## Stage Map
 

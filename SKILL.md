@@ -58,18 +58,17 @@ The single most important job of this skill is to decide **whether an apparent e
 1. Normalize the input. Accept an explicit pair `[A, B]`, a basket of symbols, or a universe plus a screening rule. Normalize each A-share symbol to `XXXXXX.SH` or `XXXXXX.SZ`; for other markets keep the user-provided ticker convention. Ask only when the input is ambiguous.
 2. Confirm the study scope. Default to daily close prices over roughly three to five years, a chronological train/test split with the most recent ~30% held out of sample, and realistic round-trip transaction costs (commission on both legs, sell-side stamp duty where applicable, slippage, and short-leg borrow carry) unless the user specifies otherwise.
 3. Read `references/statarb-guide.md` before the first dossier in a session. Use it for the stage-by-stage method map, the formulas for derived metrics, the default robustness thresholds, the report blueprint, the explicit "implemented vs. agent-supplied" split, and the appendix requirements.
-4. Fetch data **only through the zeus MCP** (`fut_daily`: daily futures bars by `ts_code` + `start_date`/`end_date`, dates `YYYYMMDD`, contract codes like `RB2501.SHF`). Never use third-party sources or connect to the database directly; if a needed field or query is missing from the MCP, report the gap instead of working around it. Do not invent contract codes, fields, or date ranges. Save the responses verbatim as a snapshot JSON, write a research config next to it, then replay offline:
+4. Fetch data **only through the zeus MCP** (`fut_daily`: daily futures bars by `ts_code` + `start_date`/`end_date`, dates `YYYYMMDD`, contract codes like `RB2501.SHF`). The bundled script calls it directly; never use third-party sources or connect to the database, and if a needed field or query is missing from the MCP, report the gap instead of working around it. Do not invent contract codes, fields, or date ranges. Write a research config, then fetch + replay:
    ```json
-   // snapshot.json
-   {"snapshot_version": 1, "server": "zeus", "server_version": null,
-    "provenance": "zeus MCP fut_daily",
-    "calls": [{"tool": "fut_daily", "params": {"ts_code": "RB2501.SHF", "start_date": "20240101", "end_date": "20241231"},
-               "retrieved_at": "<UTC ISO time of the call>", "rows": [ /* the tool's rows, unedited */ ]}]}
-   // config.json
-   {"snapshot": "snapshot.json", "legs": ["HC2501.SHF", "RB2501.SHF"], "price_field": "close",
+   {"snapshot": "snapshot.json", "legs": ["HC2501.SHF", "RB2501.SHF"],
+    "start_date": "20240101", "end_date": "20241231", "price_field": "close",
     "costs": {"commission_bps": 1.0, "stamp_duty_bps": 0.0, "borrow_annual_bps": 0.0}}
    ```
-   `python scripts/run_statarb.py --config config.json --out-dir run1` writes `report.md` and `manifest.json` (MCP calls, params, timestamps, snapshot/config sha256, code and library versions, costs used, output hashes, `run_id`). Malformed inputs fail with the exact location (e.g. `calls[1].rows[3]: missing 'close'`). Set costs explicitly: futures have no stamp duty or short borrow. Install `pip install statsmodels pandas numpy scipy`; the script's numpy ADF/KPSS fallback is for offline self-test only.
+   ```bash
+   export ZEUS_MCP_URL=http://<host>:8000/mcp ZEUS_MCP_TOKEN=<token>
+   python scripts/run_statarb.py --config run1/config.json --fetch --out-dir run1
+   ```
+   `--fetch` writes the verbatim `fut_daily` responses to the snapshot (never overwriting an existing one); without `--fetch` the same command replays that snapshot offline. Each run writes `report.md` and `manifest.json` (MCP calls, params, timestamps, server/snapshot versions, snapshot/config sha256, code and library versions, costs used, output hashes, `run_id`). Malformed inputs fail with the exact location (e.g. `calls[1].rows[3]: missing 'close'`). Set costs explicitly: futures have no stamp duty or short borrow. Install `pip install statsmodels pandas numpy scipy`; the script's numpy ADF/KPSS fallback is for offline self-test only.
 5. Collect evidence first, then analyze. Keep raw price tables, alignment diagnostics, test statistics, p-values, estimated coefficients, and trade logs long enough to cite the data window, sample size, and missing-data status in the final report.
 6. Produce Markdown by default. If the user asks for Word, PDF, or a polished deliverable, generate the analytical content here first, then use the relevant document skill for final layout.
 
@@ -91,7 +90,7 @@ The single most important job of this skill is to decide **whether an apparent e
 ## Resource Guide
 
 - `references/statarb-guide.md`: stage-by-stage method map, derived-metric formulas, robustness/risk rules, the implemented-vs-agent-supplied split, report blueprint, and final QA checklist.
-- `scripts/run_statarb.py`: runnable backbone — replays a zeus MCP snapshot via `--config` (or synthetic data for self-test), tests cointegration on the training window (ADF + KPSS, with full/OOS cross-checks), estimates the hedge ratio plus its returns-space stability (Chow-style half-sample β break test + noise-corrected chunk dispersion) and half-life, builds an adaptive z-score signal, runs a bias-controlled gross/net backtest with commission + stamp duty + borrow carry, computes Sharpe with a t-statistic and overlap-deflated effective t, runs two-level factor attribution (strategy-PnL alpha/beta and spread-return market-neutrality), applies the robustness rules, and writes the Markdown report. Built-in offline self-test: `python scripts/run_statarb.py --source synthetic --mode {coint,nocoint,strong,inversion,leaked,drift}` exercises each verdict branch (e.g. `strong`→green light, `inversion`→IS/OOS-mismatch flag, `leaked`→spread-not-market-neutral flag, `drift`→hedge-ratio-break flag) without network access.
+- `scripts/run_statarb.py`: runnable backbone — fetches daily futures bars from the zeus MCP into an immutable snapshot (`--fetch`) and replays it (`--config`), or uses synthetic data for self-test; tests cointegration on the training window (ADF + KPSS, with full/OOS cross-checks), estimates the hedge ratio plus its returns-space stability (Chow-style half-sample β break test + noise-corrected chunk dispersion) and half-life, builds an adaptive z-score signal, runs a bias-controlled gross/net backtest with commission + stamp duty + borrow carry, computes Sharpe with a t-statistic and overlap-deflated effective t, runs two-level factor attribution (strategy-PnL alpha/beta and spread-return market-neutrality), applies the robustness rules, and writes the Markdown report. Built-in offline self-test: `python scripts/run_statarb.py --source synthetic --mode {coint,nocoint,strong,inversion,leaked,drift}` exercises each verdict branch (e.g. `strong`→green light, `inversion`→IS/OOS-mismatch flag, `leaked`→spread-not-market-neutral flag, `drift`→hedge-ratio-break flag) without network access.
 
 ## Quality Bar
 
