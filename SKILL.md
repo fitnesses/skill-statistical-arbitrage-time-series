@@ -16,7 +16,7 @@ metadata:
   organization: QuantSkills
   organization_url: https://github.com/quantskills
   repository: skill-statistical-arbitrage-time-series
-  repository_url: https://github.com/quantskills/skill-statistical-arbitrage-time-series
+  repository_url: https://github.com/fitnesses/skill-statistical-arbitrage-time-series
   project_type: skill
   collection: statistical-arbitrage-time-series
 quantSkills:
