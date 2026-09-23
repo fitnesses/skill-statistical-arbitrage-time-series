@@ -1,6 +1,6 @@
 # zeus MCP 接口约定（期货统计套利 Skill 所需）
 
-本 Skill **只**通过 zeus MCP 取数（不接第三方、不直连 DolphinDB）。脚本会调用两个工具：`fut_daily` 已上线；`fut_basic` 是**待 zeus 实现的接口**。脚本启动时用 `tools/list` 探测，缺失的工具会被记为“能力缺口”，并按下文的替代办法运行，报告里逐条披露。zeus 按本约定实现后，无需改动 Skill 即自动启用。
+本 Skill **只**通过 zeus MCP 取数（不接第三方、不直连 DolphinDB）。脚本会调用两个工具：`fut_daily` 与 `fut_basic`，均已上线（2026-09-23 已核对真实返回与本约定一致）。脚本启动时用 `tools/list` 探测，缺失的工具会被记为“能力缺口”，并按下文的替代办法运行，报告里逐条披露。
 
 字段命名与 tushare 同名接口保持兼容（现有 `fut_daily` 即为此口径），便于 zeus 侧直接映射 DolphinDB 表。
 
@@ -30,12 +30,12 @@
 | `pre_settle` | 可选 | 昨结算；Skill 暂不使用 |
 | `pre_close`, `change1`, `change2`, `amount`, `oi_chg` | 可选 | Skill 不使用 |
 
-## 2. `fut_basic`（待实现）— 合约列表与静态合约参数
+## 2. `fut_basic`（已有）— 合约列表与静态合约参数
 
 | 参数 | 说明 |
 |---|---|
-| `exchange` | 交易所后缀，如 `SHF` |
-| `fut_code` | 品种代码，如 `RB` |
+| `exchange` | 交易所后缀，如 `SHF`（必填） |
+| `fut_code` | 品种代码，如 `RB`（Skill 只用 `exchange` + `fut_code` 查询） |
 
 | 字段 | 必需 | 说明 |
 |---|---|---|

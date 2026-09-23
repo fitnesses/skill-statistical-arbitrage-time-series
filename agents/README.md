@@ -21,7 +21,7 @@
 
 它最核心的能力是**判断"表观优势"是真是假**：漂亮的样本外净值曲线一文不值，除非它① Sharpe 的 t 统计量足够大（与 0 可区分）、② 没有前视泄漏、③ 扛得过逐腿手续费与滑点的真实成本、④ 不是把方向性 beta 当成 alpha。本技能默认抱持怀疑，主动设计实验去**证伪**而非印证；当证据只是"指示性"时，明说"需继续证伪"，不下可交易结论。
 
-> 行情数据只来自 **zeus MCP**（期货日线 `fut_daily`，以及待 zeus 实现的 `fut_basic`，接口见 [`references/zeus-mcp-interface.md`](../references/zeus-mcp-interface.md)）：内置脚本用 `--fetch` 调 MCP，把响应原样存成不可变快照，再离线回放；不接第三方数据源、不直连数据库。手续费率与保证金率由用户在配置中按品种指定；涨跌停暂不建模。统计检验一律用 `statsmodels`（必需依赖，缺失时脚本直接报错，不做近似），保证 p 值真实。
+> 行情数据只来自 **zeus MCP**（期货日线 `fut_daily` 与合约信息 `fut_basic`，接口见 [`references/zeus-mcp-interface.md`](../references/zeus-mcp-interface.md)）：内置脚本用 `--fetch` 调 MCP，把响应原样存成不可变快照，再离线回放；不接第三方数据源、不直连数据库。手续费率与保证金率由用户在配置中按品种指定；涨跌停暂不建模。统计检验一律用 `statsmodels`（必需依赖，缺失时脚本直接报错，不做近似），保证 p 值真实。
 
 ---
 
@@ -171,7 +171,7 @@ Statistical Arbitrage & Time Series Modeling/
 ├── requirements.txt               # numpy/pandas/scipy/statsmodels（必需）
 ├── references/
 │   ├── statarb-guide.md           # 📒 阶段方法地图、衍生指标公式、稳健性规则、实现/补充边界、报告蓝图、QA清单
-│   └── zeus-mcp-interface.md      # 🔌 zeus MCP 工具约定（fut_daily 已有；fut_basic 待实现）
+│   └── zeus-mcp-interface.md      # 🔌 zeus MCP 工具约定（fut_daily、fut_basic）
 ├── scripts/
 │   ├── run_statarb.py             # 🐍 编排：配置校验→zeus 取数/快照→回放→统计证据→规则→报告与产物
 │   └── futures.py                 # 🧾 期货规则：合约映射/换月、研究序列、合约参数、整手可执行回测
