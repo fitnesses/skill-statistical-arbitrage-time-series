@@ -1,13 +1,12 @@
 """Replay seam: config + fixed MCP snapshot -> report + manifest, no live data."""
-import hashlib, json, shutil, sys
+import hashlib, json, shutil
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 FIX = ROOT / "tests" / "fixtures"
-sys.path.insert(0, str(ROOT / "scripts"))
-import run_statarb as rs  # noqa: E402
+import run_statarb as rs
 
 
 def sha256(p):
@@ -51,21 +50,26 @@ def test_replay_writes_report_and_auditable_manifest(case):
 
     assert man["config"]["legs"] == ["HC2405.SHF", "RB2405.SHF"]
     assert man["config_sha256"] == sha256(case / "replay_config.json")
-    assert man["code"]["script_sha256"] == sha256(ROOT / "scripts" / "run_statarb.py")
+    code_sha = hashlib.sha256((sha256(ROOT / "scripts" / "run_statarb.py")
+                               + sha256(ROOT / "scripts" / "futures.py")).encode()).hexdigest()
+    assert man["code"]["sha256"] == code_sha
     assert man["run_id"] and man["created_at"]
     assert snap["path"] == "mcp_snapshot_hc_rb.json" and snap["snapshot_version"] == 1
-    assert man["contracts_used"]["HC2405.SHF"] == {
-        "multiplier": 10.0, "tick_size": 1.0, "fee_rate_bps": 1.0, "fee_per_lot": 0.0,
-        "slippage_ticks": 1.0, "margin_rate": 0.1}
-    for k in ("oos_gross_sharpe", "oos_net_sharpe", "oos_cost", "margin_per_unit", "oos_return_on_margin_ann"):
-        assert k in man["metrics"]
-    assert set(man["code"]["libs"]) >= {"python", "numpy", "pandas"}
-    assert man["data_window"]["rows_per_leg"] == {"HC2405.SHF": 320, "RB2405.SHF": 320}
+    # v1 快照未记录工具清单 → 按调用推断缺口；合约参数全部来自配置假设并披露
+    assert {m["tool"] for m in snap["missing_capabilities"]} == {"fut_basic", "fut_settle", "ft_limit"}
+    assert set(man["specs_sources"]["multiplier"]) == {"assumption"}
+    assert man["assumptions"]["HC"]["fee_rate"] == 0.0001
+    assert set(man["code"]["libs"]) >= {"python", "numpy", "pandas", "statsmodels"}
+    assert man["data_window"]["n_research_days"] == 319 and man["data_window"]["n_rolls"] == 0
+    assert man["family"] == "cross" and man["fitted"]["split_date"]
+    for k in ("net", "gross", "fees", "margin_max", "round_trips"):
+        assert k in man["metrics"]["executable"]["oos"]
 
     report = out / "report.md"
-    assert man["outputs"]["report.md"] == sha256(report)
+    for f in ("report.md", "mapping.csv", "trades.csv", "daily.csv", "rolls.csv", "events.csv"):
+        assert man["outputs"][f] == sha256(out / f)
     text = report.read_text(encoding="utf-8")
-    assert "HC2405.SHF" in text and "`mcp`" in text
+    assert "HC2405.SHF" in text and "zeus MCP" in text and man["run_id"] in text
 
 
 def test_replay_is_deterministic(case):
@@ -101,13 +105,13 @@ def test_malformed_snapshot_fails_with_location(case, mutate, needle):
 
 
 @pytest.mark.parametrize("patch, needle", [
-    ({"window": "20"}, "config: 'window' must be an integer"),
-    ({"contracts": {"HC2405.SHF": {"multiplier": 10, "tick_size": 1, "fee_rate_bps": 1, "fee_per_lot": 0,
-                                   "slippage_ticks": 1, "margin_rate": 0.1}}},
-     "config.contracts: missing spec for 'RB2405.SHF'"),
-    ({"contracts": {"HC2405.SHF": {"multiplier": 10}, "RB2405.SHF": {}}},
-     "config.contracts.HC2405.SHF: missing 'tick_size'"),
-    ({"price_field": 3}, "config: 'price_field' must be a string"),
+    ({"window": "20"}, "config.window must be a integer"),
+    ({"assumptions": {"HC": {"fee": 1}}}, "config.assumptions.HC: unknown keys ['fee']"),
+    ({"assumptions": {"HC": {"multiplier": 0}}}, "config.assumptions.HC.multiplier must be a number >0"),
+    ({"execution": {"exec_price": "vwap"}}, "config.execution.exec_price must be open/close/settle"),
+    ({"execution": {"lots": 3}}, "config.execution: unknown keys ['lots']"),
+    ({"legs": [{"product": "RB", "exchange": "SHF", "select": "second"}, "HC2405.SHF"]},
+     "config.legs[0]: 'second'"),
 ])
 def test_malformed_config_fails_with_location(case, patch, needle):
     edit_json(case / "replay_config.json", lambda d: d.update(patch))
@@ -117,14 +121,13 @@ def test_malformed_config_fails_with_location(case, patch, needle):
 
 def test_changed_config_changes_run_id(case):
     before = run(case, "o1")
-    edit_json(case / "replay_config.json",
-              lambda d: d["contracts"]["HC2405.SHF"].update(slippage_ticks=3))
+    edit_json(case / "replay_config.json", lambda d: d["execution"].update(slippage_ticks=3))
     after = run(case, "o2")
     assert before["config_sha256"] != after["config_sha256"]
     assert before["run_id"] != after["run_id"]
-    assert after["contracts_used"]["HC2405.SHF"]["slippage_ticks"] == 3
-    assert after["metrics"]["oos_gross_sharpe"] == before["metrics"]["oos_gross_sharpe"]
-    assert after["metrics"]["oos_cost"] > before["metrics"]["oos_cost"]
+    assert after["execution"]["slippage_ticks"] == 3
+    b_ex, a_ex = before["metrics"]["executable"]["all"], after["metrics"]["executable"]["all"]
+    assert a_ex["gross"] == b_ex["gross"] and a_ex["slippage"] > b_ex["slippage"]
 
 
 def test_leg_absent_from_snapshot_is_named(case):
@@ -141,7 +144,7 @@ def test_missing_config_key_is_named(case):
 
 def test_futures_cost_formula_per_leg():
     """每单位名义单边成本 = 费率 + (每手费 + 滑点跳数·跳价·乘数)/(价格·乘数)；双腿按 1:|β| 加权。"""
-    import numpy as np, pandas as pd
+    import numpy as np
     px = rs._synthetic_pair(mode="strong")
     spec_a = {"multiplier": 10, "tick_size": 0.01, "fee_rate_bps": 1.0, "fee_per_lot": 0.5,
               "slippage_ticks": 2, "margin_rate": 0.12}

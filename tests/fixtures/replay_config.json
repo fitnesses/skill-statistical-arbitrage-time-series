@@ -4,23 +4,24 @@
     "HC2405.SHF",
     "RB2405.SHF"
   ],
-  "price_field": "close",
-  "contracts": {
-    "HC2405.SHF": {
+  "rationale": "热卷与螺纹同为钢坯下游成材，共享铁矿/焦炭成本端（测试用示例理由）",
+  "assumptions": {
+    "HC": {
       "multiplier": 10,
-      "tick_size": 1,
-      "fee_rate_bps": 1.0,
+      "price_tick": 1,
+      "fee_rate": 0.0001,
       "fee_per_lot": 0,
-      "slippage_ticks": 1,
       "margin_rate": 0.1
     },
-    "RB2405.SHF": {
+    "RB": {
       "multiplier": 10,
-      "tick_size": 1,
-      "fee_rate_bps": 1.0,
+      "price_tick": 1,
+      "fee_rate": 0.0001,
       "fee_per_lot": 0,
-      "slippage_ticks": 1,
       "margin_rate": 0.1
     }
+  },
+  "execution": {
+    "slippage_ticks": 1
   }
 }

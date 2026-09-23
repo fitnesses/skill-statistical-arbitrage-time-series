@@ -16,15 +16,19 @@ The single job of this skill is to decide **whether an apparent edge is real or 
 
 Be honest in the report about provenance. `scripts/run_statarb.py` implements:
 
-- price load (zeus MCP `fut_daily` snapshot, or synthetic for self-test), calendar alignment, log prices, usable-sample reporting;
+- zeus MCP fetch into an immutable snapshot (or synthetic data for self-test), with capability gaps recorded (`references/zeus-mcp-interface.md`);
+- **point-in-time contract mapping**: dominant = most prior-day open interest (sticky, forward-only, forced out of the pre-delivery window); second = most-held contract delivering after the dominant leg; fixed contracts never roll; every roll logged with its decision day and evidence;
+- a **research continuous series** (same-contract daily log returns chained across rolls — no splice gaps) used only for statistics, kept distinct from executable contract prices;
 - OLS hedge ratio on the **training window only**, AR(1) half-life;
 - **chunk-wise β** as a cheap structural-stability proxy;
-- ADF + KPSS, run on the **training-window spread** for the headline decision (full-sample and OOS shown only as a cross-check);
+- ADF + KPSS, run on the **training-window spread** for the headline decision (full-sample and OOS shown only as a cross-check), plus **Engle-Granger cointegration** (MacKinnon p-value) on training-window log prices; all tests come from `statsmodels` (mandatory, no approximation);
 - a vectorized z-score backtest with an adaptive lookback, in/out-of-sample split, a multi-component cost model, and completed-round-trip counting;
 - Sharpe with an approximate **t-statistic** and an overlap-deflated effective t;
-- the robustness rule engine below.
+- an **integer-lot executable backtest on actual contracts**: signal at close t → fill at t+1 (open by default) → mark at settle; leg B lots = round(|β|·lots_A·P_A·M_A / (P_B·M_B)); rolls close the old and open the new contract with the same lots; per-leg fees (rate + per lot, broker multiplier), slippage in ticks, long/short margin, optional funding; a limit-locked or missing bar on either leg defers **both** legs; thin volume is flagged; IS/OOS/stress (fees ×2, slippage +1 tick) money metrics;
+- contract specs from zeus (`fut_basic`, `fut_settle` as-of the trade date, `ft_limit`) with config assumptions as the disclosed fallback and an error when both are missing;
+- the robustness rule engine below (statistical rules + futures feasibility rules).
 
-The following are **NOT** in the script and must be added by the agent when the question warrants, and must never be reported as "automatically done": Johansen cointegration, Kalman/dynamic hedge ratio, a full Chow/CUSUM break-test suite, and true walk-forward re-estimation. If the agent did not run them, say "未做" with the reason.
+The following are **NOT** in the script and must be added by the agent when the question warrants, and must never be reported as "automatically done": Johansen cointegration, Kalman/dynamic hedge ratio, a full Chow/CUSUM break-test suite, true walk-forward re-estimation, seasonality/regime analysis, and intraday execution. If the agent did not run them, say "未做" with the reason.
 
 **Now implemented in the script** (previously agent-only): factor attribution at two levels — (a) the strategy's OOS net PnL regressed on a market proxy (reports market β, residual α, and their t-stats; insignificant residual α flags an edge that may be leaked beta), and (b) the spread's daily returns regressed on the market proxy (market-neutrality check that directly addresses the low-hedge-ratio / co-moving-legs concern). The market proxy is an independent synthetic factor in self-test mode; zeus MCP runs currently have no market proxy, so attribution is reported as not done; if no proxy is available the report states attribution was not done.
 
@@ -64,7 +68,7 @@ Use these defaults unless the user supplies thresholds. If an input is missing (
 | High | Half-life > 60 trading days — reversion too slow to survive carry. |
 | High | Hedge ratio breaks: a Chow-style first-half-vs-second-half β test (in log-return space) is significant (|z| ≥ 4) with a material relative gap (> 0.2). Medium at |z| ≥ 2.5. A secondary noise-corrected chunk-dispersion `excess_drift` is reported as color. Returns space is used because chunk OLS on I(1) price levels gives spurious instability when the regressor barely moves within a window. Prefer a full Chow/CUSUM break test as the authoritative check. |
 | High | Edge vanishes after costs: net OOS Sharpe ≤ 0, or per-trade edge below modeled round-trip cost. |
-| High | **Edge has no in-sample support: in-sample net Sharpe ≈ 0 or negative while out-of-sample net Sharpe is clearly positive** — the apparent edge exists only out of sample, which points to regime dependence or luck, not a stable relationship. (This is the failure mode the engine previously missed.) |
+| High | **Edge has no in-sample support: in-sample net Sharpe ≈ 0 or negative (≤ 0.05, or its t < 1) while out-of-sample net Sharpe is clearly positive (> 0.5)** — the apparent edge exists only out of sample, which points to regime dependence or luck, not a stable relationship. (This is the failure mode the engine previously missed.) |
 | High | Overfitting: OOS net Sharpe < ~half of in-sample net Sharpe. |
 | High | **Leaked beta: spread daily returns load significantly on the market (|t|≥1.96) with material R² (≥0.10)** — the spread is not market-neutral, so "edge" may be directional beta. The script also flags HIGH when the *strategy's* net PnL has significant market β but insignificant residual α. |
 | Medium | Weak cointegration: spread ADF p between 0.05 and 0.10, or ADF and KPSS disagree. |
@@ -75,6 +79,15 @@ Use these defaults unless the user supplies thresholds. If an input is missing (
 | Medium | Data snooping: many pairs screened without a multiple-testing correction or a held-out confirmation set. |
 | Medium | Half-life between 20 and 60 days, or a Chow-style β break with 2.5 ≤ |z| < 4. |
 | Medium | z-score lookback shorter than the half-life. |
+| High | **Executable backtest loses after costs**: out-of-sample net PnL ≤ 0 on actual contracts in integer lots. |
+| Medium | Executable OOS net positive but its Sharpe |t| < 1.96. |
+| Medium | Stress scenario (fees ×2, slippage +1 tick) turns OOS net PnL non-positive. |
+| Medium | Fills deferred because a leg was limit-locked or had no bar (both legs wait). |
+| Medium | Liquidity: an order exceeds `max_participation` × that day's volume. |
+| Medium | Limit prices inferred from OHLC because zeus lacks `ft_limit`. |
+| Medium | Contract specs (multiplier, tick, fee, margin) taken from config assumptions because zeus lacks `fut_basic`/`fut_settle`. |
+| Medium | Multiple testing: `screening.n_candidates` > 1 and the training-window EG p-value exceeds the Bonferroni threshold 0.05/n. |
+| Medium | Lot rounding moves the realized notional hedge more than 10 % away from |β|. |
 | Low | Minor data gaps, a single outlier, or a borderline single metric; record in the appendix rather than the headline flag list. |
 
 Green light (verdict = "证据指向可进一步研究") requires **all** of: ADF p ≤ 0.05 on the training-window spread, finite half-life ≤ 60 days, OOS net Sharpe |t| ≥ 1.96, ≥ 30 completed round-trips, and (no attribution OR significant residual α). Slow-reverting or thin-sample pairs will therefore usually be rejected — that is the tool working as a disproof engine, not a bug.
@@ -86,14 +99,17 @@ Name combined signals explicitly, e.g. `协整边际 + Sharpe不显著`, `半衰
 Use this chapter order unless the user asks for a custom structure:
 
 1. `摘要与结论`: a one-line overall verdict (tradable-evidence vs. reject/keep-disproving), the candidate(s), in-sample vs. out-of-sample net result **with the Sharpe t-stat**, net-of-cost edge, and the top robustness flags.
-2. `数据与标的池`: symbols, market, price window, alignment policy, usable sample size, gaps/outliers handled.
-3. `配对筛选`: screening rule, candidates evaluated, why this pair; disclose multiple-testing exposure.
+2. `数据、合约映射与换月`: zeus snapshot provenance (run_id, sha256, calls, missing capabilities), research window and train/test split date, each leg's selection rule, the roll table, and the research-series vs executable-price distinction.
+3. `候选与经济逻辑`: spread family, the economic/industrial-chain rationale (required for cross-commodity), screening count and procedure, multiple-testing threshold.
 4. `协整与平稳性检验`: ADF + KPSS on the **training-window** spread (headline) with full-sample/OOS as cross-checks; Engle-Granger/Johansen if run; the cointegration conclusion.
 5. `价差建模与均值回归`: hedge-ratio estimation **and returns-space stability (Chow-style half-sample β break + `excess_drift`)**, spread construction, AR(1)/OU fit, half-life with its formula.
-6. `信号构建`: z-score lookback (≥ half-life), entry/exit/stop thresholds, holding cap, signal description.
+6. `交易可行性`: signal/execution timing, lot rule and realized hedge, cost and margin model, IS/OOS/full/stress money table (gross, fees, slippage, funding, net, Sharpe, t, drawdown, round trips, lots, turnover, margin, return on margin), deferred fills, liquidity flags, spec sources, and daily-bar execution limitations.
 7. `回测与偏差控制`: in-sample vs. out-of-sample, the futures cost model (per-leg fees + slippage, margin usage), gross vs. net, **Sharpe t-stat / effective independent bets**, **factor attribution (strategy α/β + spread market-neutrality)**, and any structural-break / walk-forward work (or its absence).
 8. `稳健性与风险信号清单`: table with level, signal, triggering rule, evidence, window/sample, and the test or formula used.
 9. `方法附录`: stage-by-stage source table with data window, usable rows, test names, key statistics, and caveats — including an explicit list of advanced steps **not** performed.
+10. `未做的分析、数据限制与假设`: analyses not run, every zeus capability gap with its fallback, config assumptions, and execution parameters.
+
+The header states two separate verdicts — **statistical evidence** and **trading feasibility** — because a stationary spread is not automatically a tradable strategy.
 
 ## Evidence And Output Requirements
 
@@ -115,6 +131,11 @@ Use this chapter order unless the user asks for a custom structure:
 - Hedge ratio and thresholds were estimated on the training window only; an untouched OOS result is reported.
 - The Sharpe is reported with its t-statistic, and a sub-2 t is called out as non-significant.
 - Costs are modeled per leg (fees + slippage) with margin usage; both gross and net are shown.
+- Every roll in `rolls.csv` was decided from prior-day information; the report distinguishes the research continuous series from executable contract prices.
+- Executable results use actual contracts and integer lots; the lot rule, realized hedge, deferred fills, and liquidity flags are reported.
+- Each contract-spec value is traced to zeus or to a disclosed config assumption; every zeus capability gap is listed with its fallback.
+- Cross-commodity spreads state their economic rationale; statistical evidence and trading feasibility have separate verdicts.
+- The report carries the run_id and snapshot hash so it can be replayed offline.
 - In-sample/out-of-sample inversion (good OOS, bad IS) is checked, not just IS-good/OOS-bad overfitting.
 - Advanced steps not performed (Johansen, Kalman, Chow/CUSUM, walk-forward) are listed as not done, not implied.
 - Multiple-testing exposure is disclosed when a universe was screened.
