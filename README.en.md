@@ -1,6 +1,6 @@
 # statistical-arbitrage-time-series
 
-An Agent Skill for reproducible, sourced statistical-arbitrage and time-series research. It covers training-window ADF/KPSS tests, spread and hedge-ratio modeling, mean reversion, bias-controlled backtests, realistic costs including short borrow, significance checks, and robustness risks.
+An Agent Skill for reproducible, sourced statistical-arbitrage and time-series research. It covers training-window ADF/KPSS tests, spread and hedge-ratio modeling, mean reversion, bias-controlled backtests, futures costs (per-leg fees, slippage, margin), significance checks, and robustness risks.
 
 This project is for research and method validation only. It makes no return claims, is not investment advice, and does not imply official endorsement by QuantSkills or any platform.
 

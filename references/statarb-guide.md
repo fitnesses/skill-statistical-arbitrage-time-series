@@ -2,14 +2,14 @@
 
 Read this guide when generating or revising a statistical-arbitrage dossier. Use it as a compact operating checklist, not as a replacement for the exact data-source documentation or the statistical-library references.
 
-The single job of this skill is to decide **whether an apparent edge is real or spurious**. Default to disproof, not confirmation: a pretty out-of-sample equity curve is not evidence until it is statistically significant, leakage-free, survives realistic costs (including short-side borrow), and is not just directional beta in disguise. When the data is only indicative, say so and stop.
+The single job of this skill is to decide **whether an apparent edge is real or spurious**. Default to disproof, not confirmation: a pretty out-of-sample equity curve is not evidence until it is statistically significant, leakage-free, survives realistic futures costs (per-leg fees, slippage, margin), and is not just directional beta in disguise. When the data is only indicative, say so and stop.
 
 ## Default Scope
 
 - Target: one candidate pair `[A, B]`, a small basket, or a universe plus a screening rule.
 - Price window: daily close (and volume when needed) over roughly three to five years unless the user requests another window.
 - Split: chronological train/test split with the most recent ~30% held strictly out of sample; never tune on the test window.
-- Costs: realistic round-trip costs — commission (both legs), sell-side stamp duty where applicable, slippage, **and the short leg's borrow/financing carry over the holding period** (add market impact for large notionals). For A-shares, treat single-name short availability itself as a risk, not a given.
+- Costs: futures costs per leg — exchange/broker fee (rate and/or per lot, charged on open and on close), slippage in ticks × tick size, and margin usage (add market impact for large notionals). Contract specs come from the config and are assumptions to be checked against current exchange/broker rules.
 - Output: Markdown report unless the user requests HTML, Word, PDF, or another deliverable.
 
 ## What The Bundled Script Computes vs. What The Agent Must Add
@@ -37,7 +37,7 @@ The following are **NOT** in the script and must be added by the agent when the 
 | Cointegration & stationarity | ADF (`adfuller`) + KPSS (`kpss`) on the **training-window** spread; Engle-Granger (`coint`) / Johansen (`coint_johansen`) when the agent adds them | Decide whether a stationary tradable spread exists; report statistic, p-value, and critical values. Correlation is not cointegration. |
 | Spread modeling & mean reversion | OLS/TLS hedge ratio (train only), chunk-wise/rolling/Kalman β, AR(1)/OU fit, half-life | Build the spread, estimate hedge ratio + reversion speed; report β stability. |
 | Signal construction | rolling mean/std, z-score with lookback **≥ half-life**, entry/exit/stop bands, holding cap | Convert the spread into signals with explicit, past-only thresholds. |
-| Backtesting & bias control | vectorized backtest, train/test isolation, walk-forward (agent), full cost model incl. borrow, structural-break tests (agent) | Evaluate out of sample with realistic frictions; check parameter drift. |
+| Backtesting & bias control | vectorized backtest, train/test isolation, walk-forward (agent), futures cost model (per-leg fees, slippage, margin), structural-break tests (agent) | Evaluate out of sample with realistic frictions; check parameter drift. |
 | Performance & risk | annualized return, Sharpe **+ its t-stat**, Sortino, max drawdown, Calmar, hit rate, holding period, turnover | Summarize gross and net performance, downside profile, and statistical significance. |
 
 ## Metrics To Derive
@@ -51,7 +51,7 @@ State the formula and the series/field names used whenever a metric is derived.
 - **Z-score**: `z_t = (spread_t − rolling_mean_t) / rolling_std_t`; lookback uses only past data and should be **at least the half-life** (a window shorter than the half-life manufactures false crossings).
 - **Performance**: `Sharpe = mean(daily PnL)/std × √252`; Sortino; max drawdown; `Calmar = annual return / |max DD|`; hit rate; holding period; turnover.
 - **Sharpe significance**: approximate `t ≈ Sharpe_annual × √years`. Because positions are held for ~half-life days, daily PnL is autocorrelated and this t is optimistic; also report an overlap-deflated `t_eff ≈ Sharpe_annual × √(years / half-life)` and the implied number of independent bets ≈ `days / half-life`. **A Sharpe with |t| < ~2 is not distinguishable from zero — do not call it an edge.**
-- **Cost-adjusted edge**: per-round-trip edge minus modeled round-trip cost = commission (both legs) + sell-side stamp duty + slippage + short-leg borrow carry over the holding period; report gross and net, and the breakeven cost.
+- **Cost-adjusted edge**: per-round-trip edge minus modeled round-trip cost = per-leg fees + slippage, legs weighted 1 : |β| by notional; report gross and net, the breakeven cost, and net return on margin.
 
 ## Robustness / Risk Rules
 
@@ -67,7 +67,6 @@ Use these defaults unless the user supplies thresholds. If an input is missing (
 | High | **Edge has no in-sample support: in-sample net Sharpe ≈ 0 or negative while out-of-sample net Sharpe is clearly positive** — the apparent edge exists only out of sample, which points to regime dependence or luck, not a stable relationship. (This is the failure mode the engine previously missed.) |
 | High | Overfitting: OOS net Sharpe < ~half of in-sample net Sharpe. |
 | High | **Leaked beta: spread daily returns load significantly on the market (|t|≥1.96) with material R² (≥0.10)** — the spread is not market-neutral, so "edge" may be directional beta. The script also flags HIGH when the *strategy's* net PnL has significant market β but insignificant residual α. |
-| High (A-share) | Single-name short feasibility: individual A-share `融券` is often unavailable, capacity-constrained, or expensive and unstable; net results assuming a freely shortable leg may be optimistic. |
 | Medium | Weak cointegration: spread ADF p between 0.05 and 0.10, or ADF and KPSS disagree. |
 | Medium | **Sharpe not significant: out-of-sample Sharpe |t| < ~1.96** (and worse once overlap-deflated). |
 | Medium | **Residual alpha not significant: after regressing strategy PnL on the market, |t(α)| < 1.96** — what looks like edge survives only as noise once beta is removed. |
@@ -92,7 +91,7 @@ Use this chapter order unless the user asks for a custom structure:
 4. `协整与平稳性检验`: ADF + KPSS on the **training-window** spread (headline) with full-sample/OOS as cross-checks; Engle-Granger/Johansen if run; the cointegration conclusion.
 5. `价差建模与均值回归`: hedge-ratio estimation **and returns-space stability (Chow-style half-sample β break + `excess_drift`)**, spread construction, AR(1)/OU fit, half-life with its formula.
 6. `信号构建`: z-score lookback (≥ half-life), entry/exit/stop thresholds, holding cap, signal description.
-7. `回测与偏差控制`: in-sample vs. out-of-sample, the full cost model (commission + stamp duty + slippage + borrow carry), gross vs. net, **Sharpe t-stat / effective independent bets**, **factor attribution (strategy α/β + spread market-neutrality)**, and any structural-break / walk-forward work (or its absence).
+7. `回测与偏差控制`: in-sample vs. out-of-sample, the futures cost model (per-leg fees + slippage, margin usage), gross vs. net, **Sharpe t-stat / effective independent bets**, **factor attribution (strategy α/β + spread market-neutrality)**, and any structural-break / walk-forward work (or its absence).
 8. `稳健性与风险信号清单`: table with level, signal, triggering rule, evidence, window/sample, and the test or formula used.
 9. `方法附录`: stage-by-stage source table with data window, usable rows, test names, key statistics, and caveats — including an explicit list of advanced steps **not** performed.
 
@@ -102,7 +101,7 @@ Use this chapter order unless the user asks for a custom structure:
 - For each robustness flag, include the test name, statistic/p-value, and window in the same row or the next sentence.
 - Report cointegration on the training window, never silently on the full sample alongside a train-only β.
 - Always report a Sharpe **with its t-statistic**; never present a Sharpe number as an edge without its significance.
-- Report both gross and net; the net cost model must include short-leg borrow carry when a leg is shorted.
+- Report both gross and net; the net cost model uses per-leg futures fees and slippage, and margin usage is reported.
 - If a section has no usable data or insufficient sample, keep the heading and state method, window, and what is missing.
 - Disclose multiple-testing exposure when a universe was screened.
 - Keep the tone analytical and non-promotional; avoid buy/sell language. Prefer "可能存在均值回归", "需要样本外确认", "Sharpe 与 0 不可区分", "扣费后优势消失".
@@ -115,9 +114,8 @@ Use this chapter order unless the user asks for a custom structure:
 - Cointegration is tested **on the training window** (ADF + KPSS), reported with critical values, not assumed.
 - Hedge ratio and thresholds were estimated on the training window only; an untouched OOS result is reported.
 - The Sharpe is reported with its t-statistic, and a sub-2 t is called out as non-significant.
-- Costs are modeled including short-leg borrow; both gross and net are shown.
+- Costs are modeled per leg (fees + slippage) with margin usage; both gross and net are shown.
 - In-sample/out-of-sample inversion (good OOS, bad IS) is checked, not just IS-good/OOS-bad overfitting.
-- For A-shares, single-name short feasibility is flagged.
 - Advanced steps not performed (Johansen, Kalman, Chow/CUSUM, walk-forward) are listed as not done, not implied.
 - Multiple-testing exposure is disclosed when a universe was screened.
 - Empty or insufficient data is disclosed rather than hidden.

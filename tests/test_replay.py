@@ -54,7 +54,11 @@ def test_replay_writes_report_and_auditable_manifest(case):
     assert man["code"]["script_sha256"] == sha256(ROOT / "scripts" / "run_statarb.py")
     assert man["run_id"] and man["created_at"]
     assert snap["path"] == "mcp_snapshot_hc_rb.json" and snap["snapshot_version"] == 1
-    assert man["costs_used"] == {"commission_bps": 1.0, "stamp_duty_bps": 0.0, "borrow_annual_bps": 0.0}
+    assert man["contracts_used"]["HC2405.SHF"] == {
+        "multiplier": 10.0, "tick_size": 1.0, "fee_rate_bps": 1.0, "fee_per_lot": 0.0,
+        "slippage_ticks": 1.0, "margin_rate": 0.1}
+    for k in ("oos_gross_sharpe", "oos_net_sharpe", "oos_cost", "margin_per_unit", "oos_return_on_margin_ann"):
+        assert k in man["metrics"]
     assert set(man["code"]["libs"]) >= {"python", "numpy", "pandas"}
     assert man["data_window"]["rows_per_leg"] == {"HC2405.SHF": 320, "RB2405.SHF": 320}
 
@@ -98,8 +102,11 @@ def test_malformed_snapshot_fails_with_location(case, mutate, needle):
 
 @pytest.mark.parametrize("patch, needle", [
     ({"window": "20"}, "config: 'window' must be an integer"),
-    ({"costs": {"commission_bps": "1"}}, "config.costs: 'commission_bps' must be a number"),
-    ({"costs": {"fee": 1}}, "config.costs: unknown keys ['fee']"),
+    ({"contracts": {"HC2405.SHF": {"multiplier": 10, "tick_size": 1, "fee_rate_bps": 1, "fee_per_lot": 0,
+                                   "slippage_ticks": 1, "margin_rate": 0.1}}},
+     "config.contracts: missing spec for 'RB2405.SHF'"),
+    ({"contracts": {"HC2405.SHF": {"multiplier": 10}, "RB2405.SHF": {}}},
+     "config.contracts.HC2405.SHF: missing 'tick_size'"),
     ({"price_field": 3}, "config: 'price_field' must be a string"),
 ])
 def test_malformed_config_fails_with_location(case, patch, needle):
@@ -110,11 +117,14 @@ def test_malformed_config_fails_with_location(case, patch, needle):
 
 def test_changed_config_changes_run_id(case):
     before = run(case, "o1")
-    edit_json(case / "replay_config.json", lambda d: d["costs"].update(commission_bps=3))
+    edit_json(case / "replay_config.json",
+              lambda d: d["contracts"]["HC2405.SHF"].update(slippage_ticks=3))
     after = run(case, "o2")
     assert before["config_sha256"] != after["config_sha256"]
     assert before["run_id"] != after["run_id"]
-    assert after["costs_used"]["commission_bps"] == 3
+    assert after["contracts_used"]["HC2405.SHF"]["slippage_ticks"] == 3
+    assert after["metrics"]["oos_gross_sharpe"] == before["metrics"]["oos_gross_sharpe"]
+    assert after["metrics"]["oos_cost"] > before["metrics"]["oos_cost"]
 
 
 def test_leg_absent_from_snapshot_is_named(case):
@@ -127,3 +137,29 @@ def test_missing_config_key_is_named(case):
     edit_json(case / "replay_config.json", lambda d: d.pop("legs"))
     with pytest.raises(rs.ReplayInputError, match="config: missing 'legs'"):
         run(case)
+
+
+def test_futures_cost_formula_per_leg():
+    """每单位名义单边成本 = 费率 + (每手费 + 滑点跳数·跳价·乘数)/(价格·乘数)；双腿按 1:|β| 加权。"""
+    import numpy as np, pandas as pd
+    px = rs._synthetic_pair(mode="strong")
+    spec_a = {"multiplier": 10, "tick_size": 0.01, "fee_rate_bps": 1.0, "fee_per_lot": 0.5,
+              "slippage_ticks": 2, "margin_rate": 0.12}
+    spec_b = {"multiplier": 5, "tick_size": 0.02, "fee_rate_bps": 0.5, "fee_per_lot": 0,
+              "slippage_ticks": 1, "margin_rate": 0.08}
+    free = {**{k: 0 for k in spec_a}, "multiplier": 1, "tick_size": 1}
+    zero = rs.backtest(px, legs={"A": free, "B": free})
+    bt = rs.backtest(px, legs={"A": spec_a, "B": spec_b})
+    assert zero["oos_net"] == zero["oos_gross"] and zero["cost"]["oos_total"] == 0
+    assert bt["oos_gross"] == zero["oos_gross"]                       # 成本不改变毛收益
+
+    ua = 1e-4 + (0.5 + 2 * 0.01 * 10) / (px["A"] * 10)
+    ub = 0.5e-4 + (0 + 1 * 0.02 * 5) / (px["B"] * 5)
+    turn = bt["pos"].diff().abs().fillna(0)
+    oos = slice(bt["split"], None)
+    exp_a = float((turn * ua).iloc[oos].sum())
+    exp_b = float((turn * abs(bt["beta"]) * ub).iloc[oos].sum())
+    assert np.isclose(bt["cost"]["oos_by_leg"]["A"], exp_a)
+    assert np.isclose(bt["cost"]["oos_by_leg"]["B"], exp_b)
+    assert np.isclose(bt["cost"]["oos_total"], exp_a + exp_b)
+    assert np.isclose(bt["margin_per_unit"], 0.12 + abs(bt["beta"]) * 0.08)

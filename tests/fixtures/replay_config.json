@@ -5,9 +5,22 @@
     "RB2405.SHF"
   ],
   "price_field": "close",
-  "costs": {
-    "commission_bps": 1.0,
-    "stamp_duty_bps": 0.0,
-    "borrow_annual_bps": 0.0
+  "contracts": {
+    "HC2405.SHF": {
+      "multiplier": 10,
+      "tick_size": 1,
+      "fee_rate_bps": 1.0,
+      "fee_per_lot": 0,
+      "slippage_ticks": 1,
+      "margin_rate": 0.1
+    },
+    "RB2405.SHF": {
+      "multiplier": 10,
+      "tick_size": 1,
+      "fee_rate_bps": 1.0,
+      "fee_per_lot": 0,
+      "slippage_ticks": 1,
+      "margin_rate": 0.1
+    }
   }
 }

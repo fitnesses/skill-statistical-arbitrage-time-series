@@ -17,8 +17,8 @@ ADF/KPSS 统计量、半衰期、对冲比率稳定性、样本外 Sharpe 及其
      而不是被原"过拟合"规则悄悄放过。
   5. 对冲比率稳定性：分段估计 β，报告漂移幅度，作为结构断点的廉价代理（高/中规则）。
   6. z-score 回看窗默认由半衰期自适应；若窗 < 半衰期会显式告警（短窗制造伪信号）。
-  7. 成本模型拆成 佣金(双腿) + 卖出印花税(单边) + 融券/融资日度carry，扣费贴近现实；
-     期货回放应在配置里显式给出成本（期货无印花税/融券，置 0）。
+  7. 成本为期货口径：逐腿 手续费(费率/每手) + 滑点(跳数×最小变动价位)，开/平各计单边，
+     两腿按 1:|β| 名义加权；报告保证金占用与保证金年化收益。合约参数必须在配置里逐腿给出。
   8. 交易计数改为"完成往返"(开→平 成对)，并报告期末未平仓，避免把开仓次数当往返。
   9. 半衰期公式与 guide 对齐：half-life = -ln2 / ln(1+b)。
 
@@ -56,7 +56,11 @@ except Exception:
 # ============ 1. 数据层 ============
 # 真实行情只经 zeus MCP 获取：fetch_snapshot() 调 fut_daily 落成快照 JSON，
 # replay() 只读快照；不直连数据库。合成数据仅供离线自测。
-COST_DEFAULTS = {"commission_bps": 5.0, "stamp_duty_bps": 5.0, "borrow_annual_bps": 800.0}
+LEG_SPEC_KEYS = ("multiplier", "tick_size", "fee_rate_bps", "fee_per_lot",
+                 "slippage_ticks", "margin_rate")
+# 合成自测用的示意合约参数（非任何真实品种）；真实研究必须在配置里逐腿给出
+SYNTH_LEG = {"multiplier": 10, "tick_size": 0.01, "fee_rate_bps": 1.0, "fee_per_lot": 0,
+             "slippage_ticks": 1, "margin_rate": 0.10}
 
 
 _SYNTH_MKT = None   # 合成市场因子日收益，供 load_market 取用
@@ -295,18 +299,20 @@ def _fmt_p(p, lo=0.01, hi=0.10):
 
 
 # ============ 3. 回测（样本外隔离 + 现实成本 + 显著性） ============
-def backtest(px, train_frac=0.70, window=None,
-             entry=2.0, exit=0.5, stop=3.5,
-             commission_bps=COST_DEFAULTS["commission_bps"],
-             stamp_duty_bps=COST_DEFAULTS["stamp_duty_bps"],
-             borrow_annual_bps=COST_DEFAULTS["borrow_annual_bps"]):
+def _unit_cost(price, spec):
+    """每单位名义本金的单边成本（分数）= 手续费率 + (每手固定费 + 滑点跳数·跳价·乘数)/(价格·乘数)。"""
+    return (spec["fee_rate_bps"] / 1e4
+            + (spec["fee_per_lot"] + spec["slippage_ticks"] * spec["tick_size"] * spec["multiplier"])
+            / (price * spec["multiplier"]))
+
+
+def backtest(px, legs, train_frac=0.70, window=None, entry=2.0, exit=0.5, stop=3.5):
     """
-    成本拆解（均以"价差对数收益"近似的分数计）：
-      - commission_bps：单腿单边佣金 (bp)；一次换手交易两条腿 → 每单位换手 2×commission。
-      - stamp_duty_bps：卖出印花税 (bp)，A 股单边、仅卖出腿，约半数换手承担。
-        （注：A 股印花税率会调整，请按当期规则核对；美股置 0。）
-      - borrow_annual_bps：做空腿的年化融券/融资成本 (bp)，按持仓天数计 carry。
-        A 股个股融券常常无券可融或成本高且不稳定，这是比统计问题更硬的现实约束。
+    期货口径成本（以"价差对数收益"近似的分数计；1 单位价差 = A 腿 1 份名义 + B 腿 |β| 份名义）：
+      - legs[腿] = {multiplier 合约乘数, tick_size 最小变动价位, fee_rate_bps 按成交额手续费,
+                    fee_per_lot 每手固定手续费(元), slippage_ticks 每次成交滑点跳数, margin_rate 保证金率}
+      - 开仓、平仓各计一次单边成本（日线无平今，不区分）；期货无印花税、无融券 carry。
+      - 保证金占用/单位价差名义 = margin_A + |β|·margin_B；报告样本外年化收益 / 保证金。
     window=None 时，z-score 回看窗按半衰期自适应（clamp 到 [20,120]）。
     """
     a, b = px.columns
@@ -345,14 +351,11 @@ def backtest(px, train_frac=0.70, window=None,
     dspread = spread.diff().fillna(0)
     gross = pos.shift(1).fillna(0) * dspread
 
-    turn = pos.diff().abs().fillna(0)
-    c_frac = commission_bps / 1e4
-    s_frac = stamp_duty_bps / 1e4
-    borrow_daily = (borrow_annual_bps / 1e4) / 252.0
-    commission_cost = turn * 2 * c_frac          # 双腿
-    stamp_cost = turn * 0.5 * s_frac             # 卖出腿、约半数换手
-    borrow_cost = pos.abs() * borrow_daily       # 持仓期做空腿 carry
-    net = gross - commission_cost - stamp_cost - borrow_cost
+    turn = pos.diff().abs().fillna(0)             # 每次开/平 = 1 次单边
+    cost_a = turn * _unit_cost(px[a], legs[a])
+    cost_b = turn * abs(beta) * _unit_cost(px[b], legs[b])
+    net = gross - cost_a - cost_b
+    margin = legs[a]["margin_rate"] + abs(beta) * legs[b]["margin_rate"]
 
     def metrics(r, n_eff_div=1.0):
         r = r.dropna()
@@ -375,7 +378,10 @@ def backtest(px, train_frac=0.70, window=None,
     p_oos = pos.iloc[oos_slice].to_numpy()
     completed, open_at_end = _count_round_trips(p_oos)
 
+    oos_n = len(px) - split
+    oos_ret_ann = float(net.iloc[oos_slice].sum()) / max(oos_n / 252.0, 1e-9)
     return dict(
+        oos_return_on_margin_ann=oos_ret_ann / margin if margin > 0 else float("nan"),
         beta=beta, spread=spread, z=z, split=split, window=window,
         hl_train=hl_train,
         is_gross=metrics(gross.iloc[is_slice]),
@@ -384,10 +390,10 @@ def backtest(px, train_frac=0.70, window=None,
         oos_net=metrics(net.iloc[oos_slice], n_eff_div),
         n_round_trips_oos=completed, open_at_end_oos=open_at_end,
         oos_net_pnl=net.iloc[oos_slice],
-        cost=dict(commission_bps=commission_bps, stamp_duty_bps=stamp_duty_bps,
-                  borrow_annual_bps=borrow_annual_bps,
-                  total_cost=float((commission_cost + stamp_cost + borrow_cost)
-                                   .iloc[oos_slice].sum())),
+        pos=pos, margin_per_unit=float(margin), legs=legs,
+        cost=dict(oos_total=float((cost_a + cost_b).iloc[oos_slice].sum()),
+                  oos_by_leg={a: float(cost_a.iloc[oos_slice].sum()),
+                              b: float(cost_b.iloc[oos_slice].sum())}),
     )
 
 
@@ -576,10 +582,16 @@ def write_report(a, b, source, px, adf_tr, kpss_tr, adf_full, adf_oos,
         f"| 样本内·净 | {f['is_net']['sharpe']:.2f} | {f['is_net']['t']:.2f} | {f['is_net']['mdd']:.4f} | {f['is_net']['ret']:.4f} |",
         f"| 样本外·毛 | {f['oos_gross']['sharpe']:.2f} | {f['oos_gross']['t']:.2f} | {f['oos_gross']['mdd']:.4f} | {f['oos_gross']['ret']:.4f} |",
         f"| **样本外·净** | **{f['oos_net']['sharpe']:.2f}** | **{f['oos_net']['t']:.2f}** | {f['oos_net']['mdd']:.4f} | {f['oos_net']['ret']:.4f} |",
-        f"\n成本：佣金 {f['cost']['commission_bps']:.0f}bp/腿/边（双腿）"
-        f" + 卖出印花税 {f['cost']['stamp_duty_bps']:.0f}bp（单边，约半数换手）"
-        f" + 做空腿融券 carry {f['cost']['borrow_annual_bps']:.0f}bp/年（按持仓天数）。"
-        f"样本外累计成本（价差单位）≈ {f['cost']['total_cost']:.4f}。",
+        "\n成本（期货口径，按腿；开/平各计一次单边；1 单位价差 = A 腿 1 份名义 + B 腿 |β| 份名义）：",
+        "| 腿 | 乘数 | 最小变动价位 | 手续费率(bp) | 每手费(元) | 滑点(跳) | 保证金率 | 样本外成本(价差单位) |",
+        "|---|---|---|---|---|---|---|---|",
+        *[f"| {leg} | {sp['multiplier']:g} | {sp['tick_size']:g} | {sp['fee_rate_bps']:g} | "
+          f"{sp['fee_per_lot']:g} | {sp['slippage_ticks']:g} | {sp['margin_rate']:.0%} | "
+          f"{f['cost']['oos_by_leg'][leg]:.4f} |" for leg, sp in ((a, f['legs'][a]), (b, f['legs'][b]))],
+        f"\n样本外累计成本 ≈ {f['cost']['oos_total']:.4f}；保证金占用 ≈ {f['margin_per_unit']:.3f}"
+        f"（每单位价差名义）；样本外年化净收益 / 保证金 ≈ **{f['oos_return_on_margin_ann']:.1%}**。"
+        "合约参数取自研究配置，属假设值（非交易所历史数据），需按当期交易所/期货公司规则核对；"
+        "未计换月成本、涨跌停与单腿成交风险。",
         "t 为 Sharpe 的近似 t 统计量（iid 假设）；持仓重叠会高估 t，"
         f"按半衰期折减后的有效 t≈{f['oos_net']['t_eff']:.2f}，"
         f"有效独立下注 ≈ 天数/半衰期。",
@@ -622,8 +634,8 @@ def write_report(a, b, source, px, adf_tr, kpss_tr, adf_full, adf_oos,
 
 
 # ============ 分析流水线（CLI 与回放共用） ============
-def analyze(px, a, b, source, mkt, out, window=None, **costs):
-    bt = backtest(px, window=window, **costs)
+def analyze(px, a, b, source, mkt, out, legs, window=None):
+    bt = backtest(px, legs, window=window)
 
     split = bt["split"]
     spread = bt["spread"]
@@ -661,6 +673,7 @@ def analyze(px, a, b, source, mkt, out, window=None, **costs):
           f"t_eff={bt['oos_net']['t_eff']:.2f}) | round-trips={bt['n_round_trips_oos']} "
           f"| factor: {attr_s} | top flag={flags[0][0]} {flags[0][1]}")
     print(f"  report -> {out}")
+    return bt
 
 
 # ============ 回放：研究配置 + 固定 MCP 快照 → 报告 + 清单（不取实时数据） ============
@@ -859,7 +872,9 @@ def _lib_versions():
 def replay(config_path, out_dir):
     """用研究配置 + 固定 MCP 响应快照离线复跑，写 report.md 与 manifest.json。
     config: {"snapshot": 相对配置文件的路径, "legs": [ts_code_a, ts_code_b],
-             "price_field": "close", "window": 0, "costs": {commission_bps,...}}
+             "price_field": "close", "window": 0,
+             "contracts": {ts_code: {multiplier, tick_size, fee_rate_bps, fee_per_lot,
+                                     slippage_ticks, margin_rate}}}
     run_id 只由 配置/快照/脚本 的内容哈希决定：输入不变 → run_id 与报告不变。"""
     config_path, out_dir = Path(config_path), Path(out_dir)
     cfg = _read_json(config_path, "config")
@@ -871,16 +886,24 @@ def replay(config_path, out_dir):
     window = cfg.get("window", 0)
     if isinstance(window, bool) or not isinstance(window, int) or window < 0:
         raise ReplayInputError(f"config: 'window' must be an integer ≥0 (0=自适应), got {window!r}")
-    costs = cfg.get("costs", {})
-    if not isinstance(costs, dict):
-        raise ReplayInputError(f"config: 'costs' must be an object, got {costs!r}")
-    unknown = set(costs) - set(COST_DEFAULTS)
-    if unknown:
-        raise ReplayInputError(f"config.costs: unknown keys {sorted(unknown)}")
-    for k, v in costs.items():
-        if not _is_num(v):
-            raise ReplayInputError(f"config.costs: '{k}' must be a number, got {v!r}")
-    costs_used = {k: float(costs.get(k, d)) for k, d in COST_DEFAULTS.items()}
+    contracts = cfg.get("contracts")
+    if not isinstance(contracts, dict):
+        raise ReplayInputError("config: missing 'contracts'（逐腿合约参数：" + ", ".join(LEG_SPEC_KEYS) + "）")
+    specs = {}
+    for leg in legs:
+        if leg not in contracts:
+            raise ReplayInputError(f"config.contracts: missing spec for '{leg}'")
+        sp = contracts[leg]
+        _require(sp, LEG_SPEC_KEYS, f"config.contracts.{leg}")
+        unknown = set(sp) - set(LEG_SPEC_KEYS)
+        if unknown:
+            raise ReplayInputError(f"config.contracts.{leg}: unknown keys {sorted(unknown)}")
+        for k in LEG_SPEC_KEYS:
+            positive = k in ("multiplier", "tick_size")
+            if not _is_num(sp[k]) or sp[k] < 0 or (positive and sp[k] == 0):
+                raise ReplayInputError(f"config.contracts.{leg}: '{k}' must be a number "
+                                       f"{'>0' if positive else '≥0'}, got {sp[k]!r}")
+        specs[leg] = {k: float(sp[k]) for k in LEG_SPEC_KEYS}
 
     snap_path = config_path.parent / cfg["snapshot"]
     snap = _read_json(snap_path, "snapshot")
@@ -888,8 +911,7 @@ def replay(config_path, out_dir):
 
     out_dir.mkdir(parents=True, exist_ok=True)
     report = out_dir / "report.md"
-    analyze(px, legs[0], legs[1], "mcp", None, str(report),
-            window=window or None, **costs_used)
+    bt = analyze(px, legs[0], legs[1], "mcp", None, str(report), specs, window=window or None)
 
     snap_sha, cfg_sha = _sha256(snap_path), _sha256(config_path)
     script_sha = _sha256(__file__)
@@ -898,7 +920,13 @@ def replay(config_path, out_dir):
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "config": cfg,
         "config_sha256": cfg_sha,
-        "costs_used": costs_used,
+        "contracts_used": specs,
+        "metrics": {"oos_gross_sharpe": bt["oos_gross"]["sharpe"],
+                    "oos_net_sharpe": bt["oos_net"]["sharpe"], "oos_net_t": bt["oos_net"]["t"],
+                    "oos_cost": bt["cost"]["oos_total"], "oos_cost_by_leg": bt["cost"]["oos_by_leg"],
+                    "margin_per_unit": bt["margin_per_unit"],
+                    "oos_return_on_margin_ann": bt["oos_return_on_margin_ann"],
+                    "n_round_trips_oos": bt["n_round_trips_oos"]},
         "snapshot": {
             "path": cfg["snapshot"], "sha256": snap_sha,
             "snapshot_version": snap.get("snapshot_version"),
@@ -934,8 +962,8 @@ def main():
                     choices=["", "coint", "nocoint", "strong", "inversion", "leaked", "drift"],
                     help="合成数据分支自测；留空则用 --cointegrated")
     ap.add_argument("--window", type=int, default=0, help="z 回看窗；0=按半衰期自适应")
-    for k, d in COST_DEFAULTS.items():
-        ap.add_argument("--" + k.replace("_", "-"), type=float, default=d)
+    ap.add_argument("--fee-bps", type=float, default=SYNTH_LEG["fee_rate_bps"], help="自测：每腿手续费率(bp)")
+    ap.add_argument("--slippage-ticks", type=float, default=SYNTH_LEG["slippage_ticks"], help="自测：每腿滑点跳数")
     ap.add_argument("--out", default="statarb_report.md")
     args = ap.parse_args()
 
@@ -958,8 +986,9 @@ def main():
         return
 
     px = _synthetic_pair(cointegrated=bool(args.cointegrated), mode=args.mode or None)
-    analyze(px, "A", "B", "synthetic", load_market(px), args.out,
-            window=args.window or None, **{k: getattr(args, k) for k in COST_DEFAULTS})
+    leg = {**SYNTH_LEG, "fee_rate_bps": args.fee_bps, "slippage_ticks": args.slippage_ticks}
+    analyze(px, "A", "B", "synthetic", load_market(px), args.out, {"A": leg, "B": leg},
+            window=args.window or None)
 
 
 if __name__ == "__main__":

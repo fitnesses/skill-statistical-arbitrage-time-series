@@ -70,8 +70,8 @@ def cfg(tmp_path):
     p = tmp_path / "config.json"
     p.write_text(json.dumps({"snapshot": "snap.json", "legs": ["HC2405.SHF", "RB2405.SHF"],
                              "start_date": "20230103", "end_date": "20240325",
-                             "costs": {"commission_bps": 1.0, "stamp_duty_bps": 0.0,
-                                       "borrow_annual_bps": 0.0}}), encoding="utf-8")
+                             "contracts": json.loads((FIX / "replay_config.json").read_text(
+                                 encoding="utf-8"))["contracts"]}), encoding="utf-8")
     return p
 
 
