@@ -18,13 +18,14 @@ ADF/KPSS 统计量、半衰期、对冲比率稳定性、样本外 Sharpe 及其
   5. 对冲比率稳定性：分段估计 β，报告漂移幅度，作为结构断点的廉价代理（高/中规则）。
   6. z-score 回看窗默认由半衰期自适应；若窗 < 半衰期会显式告警（短窗制造伪信号）。
   7. 成本模型拆成 佣金(双腿) + 卖出印花税(单边) + 融券/融资日度carry，扣费贴近现实；
-     A 股(akshare)默认追加"个股融券可得性/成本"高风险提示——很多 A 股根本无券可融。
+     期货回放应在配置里显式给出成本（期货无印花税/融券，置 0）。
   8. 交易计数改为"完成往返"(开→平 成对)，并报告期末未平仓，避免把开仓次数当往返。
   9. 半衰期公式与 guide 对齐：half-life = -ln2 / ln(1+b)。
 
 两条路径：
-  - 生产路径（你的机器）：source="akshare" / "yfinance"，统计优先用 statsmodels。
-  - 离线路径（无网/无 statsmodels）：source="synthetic"，ADF/KPSS 用本文件内置的
+  - 研究路径：数据只来自 zeus MCP。Agent 调 fut_daily 把响应落成快照 JSON，
+    脚本用 --config 离线回放，输出 report.md + manifest.json；统计优先用 statsmodels。
+  - 自测路径（无数据/无 statsmodels）：--source synthetic，ADF/KPSS 用本文件内置的
     numpy 实现（近似，仅供机器自测）；真实研究请装 statsmodels 用其精确 p 值。
 
 注意：本骨架实现的是 OLS 对冲比率 + ADF/KPSS + 分段 β 稳定性 + 单次样本外回测。
@@ -33,11 +34,13 @@ Johansen、Kalman 动态对冲、Chow/CUSUM、滚动前推(walk-forward)、价�
 请勿在报告里把它们写成"已自动完成"。
 
 用法示例：
-  python run_statarb.py --a 600519.SH --b 000858.SZ --source akshare --start 2020-01-01
   python run_statarb.py --source synthetic --cointegrated 1      # 离线自测：协整对
   python run_statarb.py --source synthetic --cointegrated 0      # 离线自测：非协整对
+  python run_statarb.py --config tests/fixtures/replay_config.json --out-dir run1
+      # 回放：研究配置 + 固定 MCP 快照 → report.md + manifest.json（不取实时数据）
 """
-import argparse, datetime as dt, time
+import argparse, datetime as dt, hashlib, json, subprocess, sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -49,67 +52,10 @@ except Exception:
     HAVE_SM = False
 
 
-# ============ 1. 数据层（把这里换成你的真实数据源即可） ============
-def load_prices(a, b, start, end, source):
-    """返回对齐后的收盘价 DataFrame，列名 = [a, b]。"""
-    if source == "akshare":
-        px = pd.concat([_akshare_one(a, start, end),
-                        _akshare_one(b, start, end)], axis=1)
-    elif source == "yfinance":
-        px = _yfinance_pair(a, b, start, end)
-    elif source == "synthetic":
-        px = _synthetic_pair(cointegrated=SYNTH_COINT, mode=SYNTH_MODE)
-    else:
-        raise ValueError(f"unknown source: {source}")
-
-    px = px.reindex(columns=[a, b]).sort_index().dropna().astype(float)
-    if len(px) < 60:
-        raise ValueError(
-            f"对齐后可用样本仅 {len(px)} 行，不足以做统计套利分析。"
-            f"请检查：代码是否正确、日期区间是否过短、两只是否有共同交易日、是否停牌/退市。")
-    return px
-
-
-def _akshare_one(sym, start, end, adjust="hfq", retries=3, pause=1.5):
-    """单只 A 股日线收盘价：后复权、带重试、列名中英文兼容、空返回报错。"""
-    import akshare as ak  # A股：免费、无需 token
-    code = sym.split(".")[0].strip()          # 600519.SH -> 600519
-    last_err = None
-    for _ in range(retries):
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start.replace("-", ""),
-                end_date=end.replace("-", ""), adjust=adjust)
-            if df is None or len(df) == 0:
-                raise ValueError(f"akshare 返回空：{sym}（代码错误 / 区间无数据 / 已退市？）")
-            col_date = "日期" if "日期" in df.columns else "date"
-            col_close = "收盘" if "收盘" in df.columns else "close"
-            s = pd.Series(df[col_close].to_numpy(),
-                          index=pd.to_datetime(df[col_date]), name=sym)
-            return s[~s.index.duplicated(keep="last")].sort_index()
-        except Exception as e:           # 网络抖动/限流时重试
-            last_err = e
-            time.sleep(pause)
-    raise RuntimeError(f"akshare 取数失败（已重试 {retries} 次）：{sym} -> {last_err}")
-
-
-def _yfinance_pair(a, b, start, end):
-    """美股/外盘：auto_adjust 收盘价，兼容单/多代码的列结构。"""
-    import yfinance as yf
-    raw = yf.download([a, b], start=start, end=end,
-                      auto_adjust=True, progress=False)
-    if raw is None or len(raw) == 0:
-        raise ValueError(f"yfinance 返回空：{[a, b]}（代码/日期？）")
-    if isinstance(raw.columns, pd.MultiIndex):
-        close = raw.xs("Close", axis=1, level=0)
-    else:
-        close = raw[["Close"]].rename(columns={"Close": a})
-    close = close.reindex(columns=[a, b])
-    empty = [c for c in (a, b) if close[c].isna().all()]
-    if empty:
-        raise ValueError(f"yfinance 未取到数据：{empty}（代码/日期？）")
-    return close
+# ============ 1. 数据层 ============
+# 真实行情只经 zeus MCP 获取：Agent 调 fut_daily 落成快照 JSON，再用 --config 回放
+# （见 replay()）。脚本本身不联网、不直连数据库；合成数据仅供离线自测。
+COST_DEFAULTS = {"commission_bps": 5.0, "stamp_duty_bps": 5.0, "borrow_annual_bps": 800.0}
 
 
 _SYNTH_MKT = None   # 合成市场因子日收益，供 load_market 取用
@@ -298,33 +244,11 @@ def beta_stability(log_a, log_b, n_chunks=6):
                 b_first=b1, b_second=b2, chow_z=chow_z, chow_rel=chow_rel)
 
 
-def load_market(source, start, end, px):
-    """市场代理的日对数收益，用于因子归因（查策略收益是否漏入方向性 beta）。
-      - synthetic：用 B 腿收益作代理（演示用）。
-      - akshare：沪深300（sh000300，需联网）。
-      - yfinance：SPY（需联网）。
-    取不到则返回 None，报告将标注"未做因子归因"。"""
-    if source == "synthetic":
-        if _SYNTH_MKT is not None:
-            return _SYNTH_MKT.reindex(px.index)
-        return np.log(px[px.columns[1]]).diff()
-    try:
-        if source == "akshare":
-            import akshare as ak
-            idx = ak.stock_zh_index_daily(symbol="sh000300")
-            s = pd.Series(idx["close"].to_numpy(),
-                          index=pd.to_datetime(idx["date"]), name="mkt")
-        else:
-            import yfinance as yf
-            raw = yf.download("SPY", start=start, end=end,
-                              auto_adjust=True, progress=False)
-            if raw is None or len(raw) == 0:
-                return None
-            close = raw["Close"]
-            s = (close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close).rename("mkt")
-        return np.log(s.reindex(px.index).ffill()).diff()
-    except Exception:
-        return None
+def load_market(px):
+    """合成自测用的市场因子日收益（因子归因演示）。回放路径无市场代理 → 不做归因。"""
+    if _SYNTH_MKT is not None:
+        return _SYNTH_MKT.reindex(px.index)
+    return np.log(px[px.columns[1]]).diff()
 
 
 def factor_attribution(pnl, mkt_ret):
@@ -370,9 +294,11 @@ def _fmt_p(p, lo=0.01, hi=0.10):
 
 
 # ============ 3. 回测（样本外隔离 + 现实成本 + 显著性） ============
-def backtest(px, source="synthetic", train_frac=0.70, window=None,
+def backtest(px, train_frac=0.70, window=None,
              entry=2.0, exit=0.5, stop=3.5,
-             commission_bps=5.0, stamp_duty_bps=5.0, borrow_annual_bps=800.0):
+             commission_bps=COST_DEFAULTS["commission_bps"],
+             stamp_duty_bps=COST_DEFAULTS["stamp_duty_bps"],
+             borrow_annual_bps=COST_DEFAULTS["borrow_annual_bps"]):
     """
     成本拆解（均以"价差对数收益"近似的分数计）：
       - commission_bps：单腿单边佣金 (bp)；一次换手交易两条腿 → 每单位换手 2×commission。
@@ -477,7 +403,7 @@ def _count_round_trips(pos_arr):
 
 
 # ============ 4. 稳健性规则引擎（对应 statarb-guide.md） ============
-def robustness_flags(adf_p, kpss_p, hl, bt, betastab, source, attr=None, attr_sp=None):
+def robustness_flags(adf_p, kpss_p, hl, bt, betastab, attr=None, attr_sp=None):
     flags = []
 
     # --- 协整 / 平稳 ---
@@ -556,12 +482,6 @@ def robustness_flags(adf_p, kpss_p, hl, bt, betastab, source, attr=None, attr_sp
             flags.append(("🟡 中", "残差alpha不显著",
                           "扣除市场后残差alpha的|t|<1.96",
                           f"α年化={attr['alpha_annual']:.3f}(t={attr['t_alpha']:.2f})"))
-
-    # --- A 股做空可得性（现实约束，非统计量）---
-    if source == "akshare":
-        flags.append(("🔴 高", "A股融券可得性",
-                      "个股融券常无券可融/成本高且不稳，扣费假设可能乐观",
-                      f"已计 borrow={bt['cost']['borrow_annual_bps']:.0f}bp/yr + 卖出印花税，请核实券源"))
 
     if not flags:
         flags.append(("🟢 低", "未触发高/中规则", "—", "通过基础稳健性检查"))
@@ -696,42 +616,13 @@ def write_report(a, b, source, px, adf_tr, kpss_tr, adf_full, adf_oos,
         "\n---",
         "本报告基于公开数据与规则化分析生成，仅供研究参考，不构成任何投资建议。",
     ]
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
 
 
-# ============ main ============
-SYNTH_COINT = True
-SYNTH_MODE = None
-
-def main():
-    global SYNTH_COINT
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--a", default="A"); ap.add_argument("--b", default="B")
-    ap.add_argument("--source", default="synthetic",
-                    choices=["akshare", "yfinance", "synthetic"])
-    ap.add_argument("--start", default="2019-01-01")
-    ap.add_argument("--end", default=dt.date.today().isoformat())
-    ap.add_argument("--cointegrated", type=int, default=1)
-    ap.add_argument("--mode", default="",
-                    choices=["", "coint", "nocoint", "strong", "inversion", "leaked", "drift"],
-                    help="合成数据分支自测；留空则用 --cointegrated")
-    ap.add_argument("--window", type=int, default=0, help="z 回看窗；0=按半衰期自适应")
-    ap.add_argument("--commission-bps", type=float, default=5.0)
-    ap.add_argument("--stamp-duty-bps", type=float, default=5.0)
-    ap.add_argument("--borrow-annual-bps", type=float, default=800.0)
-    ap.add_argument("--out", default="statarb_report.md")
-    args = ap.parse_args()
-    SYNTH_COINT = bool(args.cointegrated)
-    global SYNTH_MODE
-    SYNTH_MODE = args.mode or None
-
-    px = load_prices(args.a, args.b, args.start, args.end, args.source)
-    win = None if args.window == 0 else args.window
-    bt = backtest(px, source=args.source, window=win,
-                  commission_bps=args.commission_bps,
-                  stamp_duty_bps=args.stamp_duty_bps,
-                  borrow_annual_bps=args.borrow_annual_bps)
+# ============ 分析流水线（CLI 与回放共用） ============
+def analyze(px, a, b, source, mkt, out, window=None, **costs):
+    bt = backtest(px, window=window, **costs)
 
     split = bt["split"]
     spread = bt["spread"]
@@ -748,18 +639,17 @@ def main():
     betastab = beta_stability(log[px.columns[0]], log[px.columns[1]])
 
     # 因子归因：样本外净收益 vs 市场代理（查优势是否漏入方向性 beta）
-    mkt = load_market(args.source, args.start, args.end, px)
     attr = attr_sp = None
     if mkt is not None:
         attr = factor_attribution(bt["oos_net_pnl"], mkt)                      # 策略收益层
         spread_ret_oos = spread.diff().iloc[split:]                            # 价差中性层
         attr_sp = factor_attribution(spread_ret_oos, mkt)
 
-    flags = robustness_flags(adf_tr[1], kpss_tr[1], hl_tr, bt, betastab, args.source, attr, attr_sp)
-    write_report(args.a, args.b, args.source, px, adf_tr, kpss_tr, adf_full, adf_oos,
-                 hl_tr, hl_full, bt, betastab, flags, args.out, attr, attr_sp)
+    flags = robustness_flags(adf_tr[1], kpss_tr[1], hl_tr, bt, betastab, attr, attr_sp)
+    write_report(a, b, source, px, adf_tr, kpss_tr, adf_full, adf_oos,
+                 hl_tr, hl_full, bt, betastab, flags, out, attr, attr_sp)
 
-    print(f"[done] {args.a}×{args.b} via {args.source}")
+    print(f"[done] {a}×{b} via {source}")
     print(f"  ADF_tr stat={adf_tr[0]:.3f} p={_fmt_p(adf_tr[1], 0.001, 0.99)} "
           f"| KPSS_tr p={_fmt_p(kpss_tr[1])} "
           f"| half-life={hl_tr:.1f}d | z-win={bt['window']} | excess_drift={betastab['excess_drift']:.2f}")
@@ -769,7 +659,180 @@ def main():
     print(f"  OOS net Sharpe={bt['oos_net']['sharpe']:.2f} (t={bt['oos_net']['t']:.2f}, "
           f"t_eff={bt['oos_net']['t_eff']:.2f}) | round-trips={bt['n_round_trips_oos']} "
           f"| factor: {attr_s} | top flag={flags[0][0]} {flags[0][1]}")
-    print(f"  report -> {args.out}")
+    print(f"  report -> {out}")
+
+
+# ============ 回放：研究配置 + 固定 MCP 快照 → 报告 + 清单（不取实时数据） ============
+class ReplayInputError(ValueError):
+    """配置或快照缺字段/格式错误；消息指明位置与缺什么。"""
+
+
+def _sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _require(obj, keys, where):
+    if not isinstance(obj, dict):
+        raise ReplayInputError(f"{where}: expected an object, got {type(obj).__name__}")
+    for k in keys:
+        if k not in obj:
+            raise ReplayInputError(f"{where}: missing '{k}'")
+
+
+def _read_json(path, where):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise ReplayInputError(f"{where}: cannot read {path}: {e}") from e
+
+
+def _is_num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and np.isfinite(x)
+
+
+def _snapshot_prices(snap, legs, field):
+    """快照 → 对齐收盘价 DataFrame（列 = legs）。逐行校验必需字段。"""
+    _require(snap, ("server", "provenance", "calls"), "snapshot")
+    series = {}
+    for i, call in enumerate(snap["calls"]):
+        _require(call, ("tool", "params", "retrieved_at", "rows"), f"calls[{i}]")
+        for j, row in enumerate(call["rows"]):
+            where = f"calls[{i}].rows[{j}]"
+            _require(row, ("ts_code", "trade_date", field), where)
+            d = str(row["trade_date"])
+            if len(d) != 8 or not d.isdigit():
+                raise ReplayInputError(f"{where}: trade_date '{d}' is not YYYYMMDD")
+            if not _is_num(row[field]):
+                raise ReplayInputError(f"{where}: '{field}' is not numeric: {row[field]!r}")
+            leg = series.setdefault(row["ts_code"], {})
+            if pd.Timestamp(d) in leg:     # 分页重叠等导致的重复行：不静默覆盖
+                raise ReplayInputError(f"{where}: duplicate {row['ts_code']} {d}")
+            leg[pd.Timestamp(d)] = float(row[field])
+    missing = [leg for leg in legs if leg not in series]
+    if missing:
+        raise ReplayInputError(
+            f"snapshot has no rows for {missing}; available: {sorted(series)}")
+    px = pd.DataFrame({leg: pd.Series(series[leg]) for leg in legs}).sort_index().dropna()
+    if len(px) < 60:
+        raise ReplayInputError(f"legs {legs} share only {len(px)} dates in snapshot; need ≥60")
+    return px, {leg: len(series[leg]) for leg in legs}
+
+
+def _git_version():
+    try:
+        cwd = Path(__file__).parent
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True,
+                              text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True,
+                               text=True, check=True).stdout.strip() != ""
+        return {"git_commit": head, "git_dirty": dirty}
+    except Exception:
+        return {"git_commit": None, "git_dirty": None}
+
+
+def _lib_versions():
+    import platform
+    v = {"python": platform.python_version(), "numpy": np.__version__, "pandas": pd.__version__}
+    if HAVE_SM:
+        import statsmodels
+        v["statsmodels"] = statsmodels.__version__
+    return v
+
+
+def replay(config_path, out_dir):
+    """用研究配置 + 固定 MCP 响应快照离线复跑，写 report.md 与 manifest.json。
+    config: {"snapshot": 相对配置文件的路径, "legs": [ts_code_a, ts_code_b],
+             "price_field": "close", "window": 0, "costs": {commission_bps,...}}
+    run_id 只由 配置/快照/脚本 的内容哈希决定：输入不变 → run_id 与报告不变。"""
+    config_path, out_dir = Path(config_path), Path(out_dir)
+    cfg = _read_json(config_path, "config")
+    _require(cfg, ("snapshot", "legs"), "config")
+    legs = cfg["legs"]
+    if not (isinstance(legs, list) and len(legs) == 2 and all(isinstance(x, str) for x in legs)):
+        raise ReplayInputError(f"config: 'legs' must be two ts_code strings, got {legs!r}")
+    field = cfg.get("price_field", "close")
+    if not isinstance(field, str):
+        raise ReplayInputError(f"config: 'price_field' must be a string, got {field!r}")
+    window = cfg.get("window", 0)
+    if isinstance(window, bool) or not isinstance(window, int) or window < 0:
+        raise ReplayInputError(f"config: 'window' must be an integer ≥0 (0=自适应), got {window!r}")
+    costs = cfg.get("costs", {})
+    if not isinstance(costs, dict):
+        raise ReplayInputError(f"config: 'costs' must be an object, got {costs!r}")
+    unknown = set(costs) - set(COST_DEFAULTS)
+    if unknown:
+        raise ReplayInputError(f"config.costs: unknown keys {sorted(unknown)}")
+    for k, v in costs.items():
+        if not _is_num(v):
+            raise ReplayInputError(f"config.costs: '{k}' must be a number, got {v!r}")
+    costs_used = {k: float(costs.get(k, d)) for k, d in COST_DEFAULTS.items()}
+
+    snap_path = config_path.parent / cfg["snapshot"]
+    snap = _read_json(snap_path, "snapshot")
+    px, rows_per_leg = _snapshot_prices(snap, legs, field)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = out_dir / "report.md"
+    analyze(px, legs[0], legs[1], "mcp", None, str(report),
+            window=window or None, **costs_used)
+
+    snap_sha, cfg_sha = _sha256(snap_path), _sha256(config_path)
+    script_sha = _sha256(__file__)
+    manifest = {
+        "run_id": hashlib.sha256(f"{cfg_sha}{snap_sha}{script_sha}".encode()).hexdigest()[:16],
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "config": cfg,
+        "config_sha256": cfg_sha,
+        "costs_used": costs_used,
+        "snapshot": {
+            "path": cfg["snapshot"], "sha256": snap_sha,
+            "snapshot_version": snap.get("snapshot_version"),
+            "server": snap["server"], "server_version": snap.get("server_version"),
+            "provenance": snap["provenance"],
+            "calls": [{"tool": c["tool"], "params": c["params"],
+                       "retrieved_at": c["retrieved_at"], "n_rows": len(c["rows"])}
+                      for c in snap["calls"]],
+        },
+        "code": {"script_sha256": script_sha, **_git_version(), "libs": _lib_versions()},
+        "data_window": {"start": px.index[0].strftime("%Y-%m-%d"),
+                        "end": px.index[-1].strftime("%Y-%m-%d"), "n_aligned": len(px),
+                        "rows_per_leg": rows_per_leg},
+        "outputs": {"report.md": _sha256(report)},
+    }
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
+
+
+# ============ main ============
+def main():
+    sys.stdout.reconfigure(errors="replace")   # gbk 控制台打印 emoji 不崩
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", help="回放：研究配置 JSON（含 zeus MCP 快照路径），不取实时数据")
+    ap.add_argument("--out-dir", default="statarb_run", help="回放输出目录")
+    ap.add_argument("--source", default="synthetic", choices=["synthetic"],
+                    help="无 --config 时仅支持合成数据自测；真实数据请用 --config 回放 MCP 快照")
+    ap.add_argument("--cointegrated", type=int, default=1)
+    ap.add_argument("--mode", default="",
+                    choices=["", "coint", "nocoint", "strong", "inversion", "leaked", "drift"],
+                    help="合成数据分支自测；留空则用 --cointegrated")
+    ap.add_argument("--window", type=int, default=0, help="z 回看窗；0=按半衰期自适应")
+    for k, d in COST_DEFAULTS.items():
+        ap.add_argument("--" + k.replace("_", "-"), type=float, default=d)
+    ap.add_argument("--out", default="statarb_report.md")
+    args = ap.parse_args()
+
+    if args.config:
+        try:
+            m = replay(args.config, args.out_dir)
+        except ReplayInputError as e:
+            raise SystemExit(f"[replay input error] {e}")
+        print(f"[done] replay run_id={m['run_id']} -> {args.out_dir}")
+        return
+
+    px = _synthetic_pair(cointegrated=bool(args.cointegrated), mode=args.mode or None)
+    analyze(px, "A", "B", "synthetic", load_market(px), args.out,
+            window=args.window or None, **{k: getattr(args, k) for k in COST_DEFAULTS})
 
 
 if __name__ == "__main__":

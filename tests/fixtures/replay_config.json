@@ -1,0 +1,13 @@
+{
+  "snapshot": "mcp_snapshot_hc_rb.json",
+  "legs": [
+    "HC2405.SHF",
+    "RB2405.SHF"
+  ],
+  "price_field": "close",
+  "costs": {
+    "commission_bps": 1.0,
+    "stamp_duty_bps": 0.0,
+    "borrow_annual_bps": 0.0
+  }
+}
