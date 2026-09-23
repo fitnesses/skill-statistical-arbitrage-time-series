@@ -9,8 +9,8 @@ import run_statarb as rs
 import zeus_fixtures as zf
 
 START, END = zf.window_of()
-ASSUME = {p: {"multiplier": 10, "price_tick": 1, "fee_rate": 0.0001, "fee_per_lot": 0, "margin_rate": 0.1}
-          for p in ("RB", "HC")}
+COSTS = {p: {"fee_rate": 0.0001, "fee_per_lot": 0, "margin_rate": 0.1} for p in ("RB", "HC")}
+ASSUME = {p: {"multiplier": 10, "price_tick": 1, **COSTS[p]} for p in ("RB", "HC")}
 CAL = {"legs": [{"name": "near", "product": "RB", "exchange": "SHF", "select": "dominant"},
                 {"name": "far", "product": "RB", "exchange": "SHF", "select": "second"}]}
 CROSS = {"legs": [{"name": "HC", "product": "HC", "exchange": "SHF", "select": "dominant"},
@@ -41,7 +41,7 @@ def daily_only_zeus(market):
 
 
 def write_cfg(tmp, extra, **kw):
-    cfg = {"snapshot": "snapshot.json", "start_date": START, "end_date": END, **extra, **kw}
+    cfg = {"snapshot": "snapshot.json", "start_date": START, "end_date": END, "assumptions": COSTS, **extra, **kw}
     p = tmp / "config.json"
     p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     return p
@@ -78,7 +78,8 @@ def test_calendar_spread_end_to_end(tmp_path, full_zeus):
               "研究用连续序列"):
         assert s in text, s
     assert man["snapshot"]["missing_capabilities"] == []
-    assert man["specs_sources"]["fee_rate"] == {"fut_settle": man["specs_sources"]["fee_rate"]["fut_settle"]}
+    assert set(man["specs_sources"]["multiplier"]) == {"fut_basic"}
+    assert set(man["specs_sources"]["fee_rate"]) == {"config"}
     ex = man["metrics"]["executable"]
     for k in ("gross", "net", "fees", "slippage", "max_drawdown", "round_trips", "margin_max",
               "return_on_margin_ann", "turnover_ann"):
@@ -111,10 +112,10 @@ def test_multiple_testing_threshold_is_reported(tmp_path, full_zeus):
 def test_missing_zeus_capabilities_fall_back_to_disclosed_assumptions(tmp_path, daily_only_zeus):
     cfg, man = fetch_and_run(tmp_path, daily_only_zeus, CROSS, assumptions=ASSUME)
     missing = {m["tool"] for m in man["snapshot"]["missing_capabilities"]}
-    assert missing == {"fut_basic", "fut_settle", "ft_limit"}
-    assert set(man["specs_sources"]["multiplier"]) == {"assumption"}
+    assert missing == {"fut_basic"}
+    assert set(man["specs_sources"]["multiplier"]) == {"config"}
     text = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
-    assert "fut_settle" in text and "假设" in text and "推断" in text
+    assert "fut_basic" in text and "未考虑涨跌停" in text
 
 
 def test_missing_capability_without_assumption_names_tool_and_config_key(tmp_path, daily_only_zeus):
@@ -146,6 +147,13 @@ def test_test_period_data_cannot_change_fitted_parameters(tmp_path, full_zeus):
     moved = rs.replay(cfg, tmp_path / "out2")
     assert moved["fitted"] == base["fitted"]
     assert moved["metrics"]["executable"]["oos"]["net"] != base["metrics"]["executable"]["oos"]["net"]
+
+
+def test_fees_and_margin_must_be_given_per_product(tmp_path):
+    with pytest.raises(rs.ReplayInputError, match=r"config.assumptions.RB.*margin_rate"):
+        rs.load_config(write_cfg(tmp_path, CAL, assumptions={"RB": {"fee_rate": 0.0001}}))
+    with pytest.raises(rs.ReplayInputError, match=r"config.assumptions.HC.*fee_rate.*fee_per_lot"):
+        rs.load_config(write_cfg(tmp_path, CROSS, assumptions={"RB": COSTS["RB"], "HC": {"margin_rate": 0.1}}))
 
 
 def test_check_zeus_reports_required_and_optional_capabilities(full_zeus, daily_only_zeus):

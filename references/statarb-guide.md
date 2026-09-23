@@ -24,8 +24,8 @@ Be honest in the report about provenance. `scripts/run_statarb.py` implements:
 - ADF + KPSS, run on the **training-window spread** for the headline decision (full-sample and OOS shown only as a cross-check), plus **Engle-Granger cointegration** (MacKinnon p-value) on training-window log prices; all tests come from `statsmodels` (mandatory, no approximation);
 - a vectorized z-score backtest with an adaptive lookback, in/out-of-sample split, a multi-component cost model, and completed-round-trip counting;
 - Sharpe with an approximate **t-statistic** and an overlap-deflated effective t;
-- an **integer-lot executable backtest on actual contracts**: signal at close t → fill at t+1 (open by default) → mark at settle; leg B lots = round(|β|·lots_A·P_A·M_A / (P_B·M_B)); rolls close the old and open the new contract with the same lots; per-leg fees (rate + per lot, broker multiplier), slippage in ticks, long/short margin, optional funding; a limit-locked or missing bar on either leg defers **both** legs; thin volume is flagged; IS/OOS/stress (fees ×2, slippage +1 tick) money metrics;
-- contract specs from zeus (`fut_basic`, `fut_settle` as-of the trade date, `ft_limit`) with config assumptions as the disclosed fallback and an error when both are missing;
+- an **integer-lot executable backtest on actual contracts**: signal at close t → fill at t+1 (open by default) → mark at settle; leg B lots = round(|β|·lots_A·P_A·M_A / (P_B·M_B)); rolls close the old and open the new contract with the same lots; per-leg fees (rate + per lot, broker multiplier), slippage in ticks, margin at the user-specified rate, optional funding; a missing bar on either leg defers **both** legs; limit locks are not modeled; thin volume is flagged; IS/OOS/stress (fees ×2, slippage +1 tick) money metrics;
+- contract specs: multiplier/tick from zeus `fut_basic` (config fallback, disclosed); fee rate/per-lot fee and margin rate specified by the user per product in the config; an error when a required value is missing;
 - the robustness rule engine below (statistical rules + futures feasibility rules).
 
 The following are **NOT** in the script and must be added by the agent when the question warrants, and must never be reported as "automatically done": Johansen cointegration, Kalman/dynamic hedge ratio, a full Chow/CUSUM break-test suite, true walk-forward re-estimation, seasonality/regime analysis, and intraday execution. If the agent did not run them, say "未做" with the reason.
@@ -82,10 +82,9 @@ Use these defaults unless the user supplies thresholds. If an input is missing (
 | High | **Executable backtest loses after costs**: out-of-sample net PnL ≤ 0 on actual contracts in integer lots. |
 | Medium | Executable OOS net positive but its Sharpe |t| < 1.96. |
 | Medium | Stress scenario (fees ×2, slippage +1 tick) turns OOS net PnL non-positive. |
-| Medium | Fills deferred because a leg was limit-locked or had no bar (both legs wait). |
+| Medium | Fills deferred because a leg had no bar (both legs wait). |
 | Medium | Liquidity: an order exceeds `max_participation` × that day's volume. |
-| Medium | Limit prices inferred from OHLC because zeus lacks `ft_limit`. |
-| Medium | Contract specs (multiplier, tick, fee, margin) taken from config assumptions because zeus lacks `fut_basic`/`fut_settle`. |
+| Medium | Multiplier/tick taken from config because zeus lacks `fut_basic` (fees and margin are always user-specified and disclosed). |
 | Medium | Multiple testing: `screening.n_candidates` > 1 and the training-window EG p-value exceeds the Bonferroni threshold 0.05/n. |
 | Medium | Lot rounding moves the realized notional hedge more than 10 % away from |β|. |
 | Low | Minor data gaps, a single outlier, or a borderline single metric; record in the appendix rather than the headline flag list. |

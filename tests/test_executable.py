@@ -1,4 +1,4 @@
-"""可执行回测：整手、真实合约价格、成本/保证金、涨跌停一腿不成交则两腿都不成交、流动性标记。"""
+"""可执行回测：整手、真实合约价格、成本/保证金、一腿无行情则两腿都不成交、流动性标记。"""
 
 import numpy as np
 import pandas as pd
@@ -18,22 +18,21 @@ EX = {"base_lots": 10, "exec_price": "open", "mark_price": "settle", "slippage_t
       "broker_fee_multiplier": 1.0, "broker_margin_add": 0.0}
 
 
-def rows(locked=None, vol=1e6):
+def rows(missing=None, vol=1e6):
     out = []
     for code, series in PX.items():
         for d, (o, s) in zip(D, series):
             hi, lo = max(o, s) + 1, min(o, s) - 1
-            if locked and (code, d) == locked:
-                o = s = hi = lo = 55.0                       # 一字跌停
+            if missing and (code, d) == missing:
+                continue                                     # 当日无行情
             out.append({"ts_code": code, "trade_date": d, "open": float(o), "high": float(hi),
                         "low": float(lo), "close": float(s), "settle": float(s),
                         "pre_settle": float(s), "vol": vol, "oi": 1000.0})
     return out
 
 
-def specs(limits=None):
-    return fx.ContractSpecs(basic=[], settle=[], limits=limits or [],
-                            assumptions={"AA": SPEC, "BB": SPEC})
+def specs():
+    return fx.ContractSpecs(basic=[], assumptions={"AA": SPEC, "BB": SPEC})
 
 
 def run(rs, target, mapping=None, sp=None, ex=EX, beta=0.5):
@@ -84,8 +83,8 @@ def test_roll_while_holding_closes_old_and_opens_new_contract_with_same_lots():
     assert res["metrics"]["all"]["rolls"] == 1
 
 
-def test_one_leg_at_limit_defers_both_legs():
-    res = run(rows(locked=("BB2405.SHF", D[1])), [1, 1, 1, 0])
+def test_one_leg_without_a_bar_defers_both_legs():
+    res = run(rows(missing=("BB2405.SHF", D[1])), [1, 1, 1, 0])
     tr, ev = res["trades"], res["events"]
     assert tr[tr.date == pd.Timestamp(D[1])].empty                 # 两腿都未成交
     assert ((ev.date == pd.Timestamp(D[1])) & (ev.kind == "deferred")).any()
@@ -93,10 +92,13 @@ def test_one_leg_at_limit_defers_both_legs():
     assert set(tr[tr.date == pd.Timestamp(D[2])].ts_code) == {"AA2405.SHF", "BB2405.SHF"}
 
 
-def test_limit_prices_from_zeus_take_precedence_over_ohlc_inference():
-    lim = [{"ts_code": "BB2405.SHF", "trade_date": D[1], "up_limit": 70.0, "down_limit": 50.0}]
-    res = run(rows(locked=("BB2405.SHF", D[1])), [1, 1, 1, 0], sp=specs(lim))
-    # 一字 55 高于跌停 50 → 按交易所涨跌停价判定并未封板 → 正常成交
+def test_one_price_bar_is_not_treated_as_limit_lock():
+    """涨跌停暂不建模：一字板照常按假设价成交（报告中披露为局限）。"""
+    rs = rows()
+    for r in rs:
+        if (r["ts_code"], r["trade_date"]) == ("BB2405.SHF", D[1]):
+            r.update(open=55.0, high=55.0, low=55.0, close=55.0, settle=55.0)
+    res = run(rs, [1, 1, 1, 0])
     assert not res["trades"][res["trades"].date == pd.Timestamp(D[1])].empty
 
 
@@ -113,18 +115,19 @@ def test_costs_change_net_not_gross():
 
 
 def test_missing_spec_names_zeus_tool_and_config_key():
-    sp = fx.ContractSpecs(basic=[], settle=[], limits=[], assumptions={"AA": SPEC})
+    sp = fx.ContractSpecs(basic=[], assumptions={"AA": SPEC})
     with pytest.raises(fx.MissingData, match=r"BB2405.SHF.*fut_basic.*assumptions.BB.multiplier"):
         run(rows(), [1, 1, 0], sp=sp)
 
 
-def test_effective_dated_settle_params_override_assumptions():
-    settle = [{"ts_code": "AA2405.SHF", "trade_date": D[0], "trading_fee_rate": 0.0002, "trading_fee": 0.0,
-               "long_margin_rate": 0.2, "short_margin_rate": 0.2}]
-    sp = fx.ContractSpecs(basic=[], settle=settle, limits=[], assumptions={"AA": SPEC, "BB": SPEC})
-    s = sp.spec("AA2405.SHF", pd.Timestamp(D[4]))       # 取最近一条（D0）作为 D4 的有效值
-    assert s["fee_rate"] == 0.0002 and s["margin_long"] == 0.2 and s["source"]["fee_rate"] == "fut_settle"
-    assert sp.spec("BB2405.SHF", pd.Timestamp(D[4]))["source"]["fee_rate"] == "assumption"
+def test_fut_basic_sets_multiplier_and_tick_while_fees_and_margin_come_from_config():
+    basic = [{"ts_code": "AA2405.SHF", "multiplier": 5, "price_tick": 2}]
+    sp = fx.ContractSpecs(basic=basic, assumptions={"AA": SPEC, "BB": SPEC})
+    s = sp.spec("AA2405.SHF", pd.Timestamp(D[4]))
+    assert (s["multiplier"], s["price_tick"]) == (5.0, 2.0) and s["source"]["multiplier"] == "fut_basic"
+    assert s["fee_rate"] == 0.0001 and s["margin_long"] == s["margin_short"] == 0.1
+    assert s["source"]["fee_rate"] == "config"
+    assert sp.spec("BB2405.SHF", pd.Timestamp(D[4]))["source"]["multiplier"] == "config"
 
 
 def test_direct_reversal_records_entry_and_round_trip():

@@ -41,7 +41,7 @@ def test_fetch_writes_verbatim_snapshot_then_replays(cfg, zeus_url):
     assert on_disk == snap
     assert snap["server"] == "ZeusMCP" and snap["server_version"] == "1.0.0"
     assert snap["tools_available"] == ["fut_daily"]
-    assert {m["tool"] for m in snap["missing_capabilities"]} == {"fut_basic", "fut_settle", "ft_limit"}
+    assert {m["tool"] for m in snap["missing_capabilities"]} == {"fut_basic"}
     assert [c["params"] for c in snap["calls"]] == [
         {"ts_code": leg, "start_date": "20230103", "end_date": "20240325"}
         for leg in ("HC2405.SHF", "RB2405.SHF")]
@@ -62,14 +62,14 @@ def test_fetch_never_overwrites_a_snapshot(cfg, zeus_url):
 
 
 def test_tool_error_names_the_leg(cfg, zeus_url):
-    edit(cfg, legs=["HC2405.SHF", "BAD.SHF"])
+    edit(cfg, legs=["HC2405.SHF", "BAD.SHF"], assumptions={**BASE["assumptions"], "BAD": {"fee_rate": 0.0001, "margin_rate": 0.1}})
     with pytest.raises(rs.ZeusError, match="BAD.SHF.*boom"):
         rs.fetch_snapshot(cfg, zeus_url, zf.TOKEN)
     assert not (cfg.parent / "snap.json").exists()
 
 
 def test_empty_leg_is_reported_not_written(cfg, zeus_url):
-    edit(cfg, legs=["HC2405.SHF", "I2405.DCE"])
+    edit(cfg, legs=["HC2405.SHF", "I2405.DCE"], assumptions={**BASE["assumptions"], "I": {"fee_rate": 0.0001, "margin_rate": 0.1}})
     with pytest.raises(rs.ZeusError, match="I2405.DCE.*no rows"):
         rs.fetch_snapshot(cfg, zeus_url, zf.TOKEN)
     assert not (cfg.parent / "snap.json").exists()

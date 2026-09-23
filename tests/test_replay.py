@@ -55,9 +55,9 @@ def test_replay_writes_report_and_auditable_manifest(case):
     assert man["code"]["sha256"] == code_sha
     assert man["run_id"] and man["created_at"]
     assert snap["path"] == "mcp_snapshot_hc_rb.json" and snap["snapshot_version"] == 1
-    # v1 快照未记录工具清单 → 按调用推断缺口；合约参数全部来自配置假设并披露
-    assert {m["tool"] for m in snap["missing_capabilities"]} == {"fut_basic", "fut_settle", "ft_limit"}
-    assert set(man["specs_sources"]["multiplier"]) == {"assumption"}
+    # v1 快照未记录工具清单 → 按调用推断缺口；乘数/跳价与费率/保证金全部来自配置
+    assert {m["tool"] for m in snap["missing_capabilities"]} == {"fut_basic"}
+    assert set(man["specs_sources"]["multiplier"]) == {"config"}
     assert man["assumptions"]["HC"]["fee_rate"] == 0.0001
     assert set(man["code"]["libs"]) >= {"python", "numpy", "pandas", "statsmodels"}
     assert man["data_window"]["n_research_days"] == 319 and man["data_window"]["n_rolls"] == 0
@@ -131,7 +131,7 @@ def test_changed_config_changes_run_id(case):
 
 
 def test_leg_absent_from_snapshot_is_named(case):
-    edit_json(case / "replay_config.json", lambda d: d.update(legs=["HC2405.SHF", "I2405.DCE"]))
+    edit_json(case / "replay_config.json", lambda d: d.update(legs=["HC2405.SHF", "I2405.DCE"], assumptions={**d["assumptions"], "I": {"fee_rate": 0.0001, "margin_rate": 0.1}}))
     with pytest.raises(rs.ReplayInputError, match="I2405.DCE"):
         run(case)
 

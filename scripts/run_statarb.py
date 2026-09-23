@@ -701,17 +701,15 @@ def futures_flags(s, ctx):
     ev = exe["events"]
     n_def, n_liq = int((ev.kind == "deferred").sum()), int((ev.kind == "liquidity").sum())
     if n_def:
-        out.append(("🟡 中", "成交被顺延", "一腿涨跌停封板/无行情 → 两腿都不成交，次日重试",
+        out.append(("🟡 中", "成交被顺延", "一腿当日无行情 → 两腿都不成交，次日重试",
                     f"{n_def} 个交易日（见 events.csv）"))
     if n_liq:
         out.append(("🟡 中", "流动性不足", f"单笔手数 > {cfg['execution']['max_participation']:.0%}×当日成交量",
                     f"{n_liq} 笔（见 events.csv）"))
-    if "ft_limit" in {x["tool"] for x in ctx["missing"]}:
-        out.append(("🟡 中", "涨跌停为推断", "zeus 缺 ft_limit", "按 OHLC 一字板推断封板，可能漏判/误判"))
-    assumed = sorted(k for k, v in ctx["sources"].items() if "assumption" in v)
+    assumed = sorted(k for k in ("multiplier", "price_tick") if "config" in ctx["sources"].get(k, {}))
     if assumed:
-        out.append(("🟡 中", "合约参数使用配置假设", "zeus fut_basic/fut_settle 缺失或无对应行",
-                    f"字段 {assumed} 用 config assumptions（整段常数，非逐日历史）"))
+        out.append(("🟡 中", "合约乘数/跳价来自配置", "zeus fut_basic 缺失或无对应合约",
+                    f"字段 {assumed} 用 config assumptions，请核对交易所合约规格"))
     if s.get("season") and s["season"][1] < 0.05:
         out.append(("🟡 中", "价差存在季节性", "训练窗按月 Kruskal-Wallis p<0.05",
                     f"H={s['season'][0]:.2f}, p={s['season'][1]:.4f}；全样本统计可能掩盖分月差异"))
@@ -768,7 +766,6 @@ def futures_report_parts(a, b, s, ctx, flags):
     stat_ok = _stat_tradable(s)
     exe_ok = bool(oos.get("days")) and oos["net"] > 0 and abs(oos["t"]) >= 1.96 and \
         not any(fl[0] == "🔴 高" for fl in flags)
-    miss = {x["tool"] for x in ctx["missing"]}
     rolls, research = ctx["rolls"], ctx["research"]
     n = cfg["screening"]["n_candidates"]
     ev = exe["events"]
@@ -817,8 +814,11 @@ def futures_report_parts(a, b, s, ctx, flags):
         f"{'>0 时两腿反向' if bt['beta'] > 0 else '≤0 时两腿同向'}。持仓期间手数不变；换月按原手数平旧开新。",
         (f"- 开仓 {len(hedges)} 次；取整后实际名义对冲比 均值 {np.mean(hedges):.3f}（|β|={abs(bt['beta']):.3f}），"
          f"范围 {min(hedges):.3f}~{max(hedges):.3f}。") if hedges else "- 回测期内未开仓。",
+        "- 手续费率与保证金率由用户在配置中按品种指定（整段常数，非逐日历史）："
+        + "；".join(f"{p} 费率 {v.get('fee_rate', 0):g}、每手 {v.get('fee_per_lot', 0):g} 元、保证金 {v['margin_rate']:.0%}"
+                   for p, v in cfg["assumptions"].items() if "margin_rate" in v) + "。",
         f"- 成本：手续费 = 手数×(成交价×乘数×费率 + 每手费)×{ex['broker_fee_multiplier']:g}（经纪商倍数），开、平各计；"
-        f"滑点 {ex['slippage_ticks']:g} 跳/手/次；保证金 = Σ|手数|×盯市价×乘数×(多/空保证金率 + "
+        f"滑点 {ex['slippage_ticks']:g} 跳/手/次；保证金 = Σ|手数|×盯市价×乘数×(保证金率 + "
         f"{ex['broker_margin_add']:g})；保证金资金成本 {ex['funding_rate_annual']:.2%}/年；本金 {ex['capital']:,.0f} 元。",
         "| 区间 | 毛PnL | 手续费 | 滑点 | 资金成本 | 净PnL | 年化(本金) | Sharpe | t | 最大回撤(占本金) | "
         "完成往返 | 成交手数 | 年化换手 | 最大保证金 | 年化收益/平均保证金 |",
@@ -826,9 +826,8 @@ def futures_report_parts(a, b, s, ctx, flags):
         _money_row("样本内", M.get("is")), _money_row("**样本外**", oos), _money_row("全样本", M["all"]),
         _money_row("样本外·压力(费×2, 滑点+1跳)", ctx["stress"].get("oos")),
         f"- 换月执行 {M['all'].get('rolls', 0)} 次；成交顺延 {int((ev.kind == 'deferred').sum())} 日；流动性标记 "
-        f"{int((ev.kind == 'liquidity').sum())} 笔（events.csv）。涨跌停判定："
-        f"{'按 OHLC 一字板推断（zeus 缺 ft_limit）' if 'ft_limit' in miss else 'zeus ft_limit 涨跌停价'}；"
-        "一腿不能成交则两腿都不成交，次日重试（不留单腿敞口）。",
+        f"{int((ev.kind == 'liquidity').sum())} 笔（events.csv）。一腿当日无行情则两腿都不成交，次日重试"
+        "（不留单腿敞口）。**未考虑涨跌停**：一字板日按假设价成交，可能高估可成交性。",
         "- 成本按腿与开/平拆分（全样本，元）：",
         "| 腿 | 开仓手续费 | 平仓手续费 | 换月手续费 | 滑点 | 其中换月滑点 |",
         "|---|---|---|---|---|---|",
@@ -848,9 +847,9 @@ def futures_report_parts(a, b, s, ctx, flags):
     sec10 = [
         "\n## 10. 未做的分析、数据限制与假设",
         "- 未做（需 Agent 另行补充，不得写成已完成）：Johansen 协整、Kalman 动态对冲、完整 Chow/CUSUM、"
-        "滚动前推（walk-forward）、季节性与区制分析、因子归因（zeus 暂无市场代理序列）、盘中/分钟级执行。",
+        "滚动前推（walk-forward）、区制分析、因子归因（zeus 暂无市场代理序列）、盘中/分钟级执行、涨跌停封板约束。",
         *[f"- 数据缺口：zeus 缺 `{m['tool']}`（{m['purpose']}）→ {m['fallback']}。" for m in ctx["missing"]],
-        f"- 假设值：{json.dumps(cfg['assumptions'], ensure_ascii=False) if cfg['assumptions'] else '无（合约参数全部来自 zeus）'}。",
+        f"- 用户指定的合约参数：{json.dumps(cfg['assumptions'], ensure_ascii=False)}。",
         f"- 执行参数：{json.dumps(ex, ensure_ascii=False)}。",
         "- 第 7 章为研究口径（价差对数收益 + 近似成本），只作统计证据；金额口径以第 6 章为准。",
     ]
@@ -870,16 +869,12 @@ ENTRY, EXIT, STOP = 2.0, 0.5, 3.5
 # zeus 工具 → (用途, 缺失时的替代)；接口定义见 references/zeus-mcp-interface.md
 OPTIONAL_TOOLS = {
     "fut_basic": ("合约列表、合约乘数、最小变动价位", "按 品种+YYMM 枚举合约代码探测；乘数/跳价用 config assumptions"),
-    "fut_settle": ("按日生效的手续费率/每手手续费、多空保证金率", "config assumptions（整段常数假设）"),
-    "ft_limit": ("每日涨跌停价", "按 OHLC 一字板推断封板"),
 }
 DAILY_FIELDS = ("ts_code", "trade_date", "open", "high", "low", "close", "settle", "vol", "oi")
 # 各工具必需字段（与 references/zeus-mcp-interface.md 一致）；快照校验与 --check-zeus 共用
 TOOL_FIELDS = {
     "fut_daily": DAILY_FIELDS,
     "fut_basic": ("ts_code", "fut_code", "exchange", "multiplier", "price_tick", "list_date", "delist_date"),
-    "fut_settle": ("ts_code", "trade_date", "trading_fee_rate", "trading_fee", "long_margin_rate", "short_margin_rate"),
-    "ft_limit": ("ts_code", "trade_date", "up_limit", "down_limit"),
 }
 
 
@@ -998,6 +993,13 @@ def load_config(config_path):
             raise ReplayInputError(f"config.assumptions.{prod}: unknown keys {sorted(unknown)}")
         assumptions[prod.upper()] = {k: _num(v, f"config.assumptions.{prod}.{k}",
                                              strict=k in ("multiplier", "price_tick")) for k, v in a.items()}
+    for prod in dict.fromkeys(l["product"] for l in legs):     # 手续费与保证金没有数据源，必须由用户给出
+        a = assumptions.get(prod, {})
+        if "margin_rate" not in a:
+            raise ReplayInputError(f"config.assumptions.{prod}: missing 'margin_rate'（保证金率需由用户指定，如 0.10）")
+        if "fee_rate" not in a and "fee_per_lot" not in a:
+            raise ReplayInputError(f"config.assumptions.{prod}: 需指定 'fee_rate'（按成交额，如 0.0001）"
+                                   f"或 'fee_per_lot'（元/手）")
     window = _num(cfg.get("window", 0), "config.window", 0, integer=True)
     train_frac = _num(cfg.get("train_frac", 0.7), "config.train_frac", 0.3, 0.9)
     for k in ("start_date", "end_date"):
@@ -1105,7 +1107,7 @@ def _probe_codes(product, exch, start, end):
 
 
 def fetch_snapshot(config_path, url, token=None):
-    """按研究配置调 zeus：fut_basic（或枚举）→ 每张合约 fut_daily → 可选 fut_settle / ft_limit，
+    """按研究配置调 zeus：fut_basic（或枚举）→ 每张合约 fut_daily，
     响应原样写入快照（不可变：已存在则拒绝；任何失败都不写文件）。缺失的可选工具记为能力缺口。"""
     cfg = load_config(config_path)
     start, end = cfg["start_date"], cfg["end_date"]
@@ -1155,15 +1157,11 @@ def fetch_snapshot(config_path, url, token=None):
     for prod, cs in product_codes.items():
         if not any(n_rows[c] for c in cs):
             raise ZeusError(f"{prod}: fut_daily returned no rows for any contract in {start}~{end}")
-    live = [c for c, n in n_rows.items() if n]
     missing = []
     for tool, (purpose, fallback) in OPTIONAL_TOOLS.items():
         if tool not in tools:
             missing.append({"tool": tool, "purpose": purpose, "fallback": fallback})
             continue
-        if tool != "fut_basic":
-            for c in live:
-                call(tool, {"ts_code": c, "start_date": start, "end_date": end})
 
     info = client.server_info
     snap = {"snapshot_version": 2,
@@ -1203,11 +1201,10 @@ def check_zeus(url, token, sample_code, start, end):
 def load_snapshot(snap):
     """校验快照并按工具归集行；逐行校验必需字段，错误指明 calls[i].rows[j]。"""
     _require(snap, ("server", "provenance", "calls"), "snapshot")
-    out = {"fut_daily": [], "fut_basic": [], "fut_settle": [], "ft_limit": []}
-    # 快照只强制主键与会被使用的数值字段；可选工具其余字段缺失时按行回落到配置假设
-    required = {"fut_daily": DAILY_FIELDS, "fut_basic": ("ts_code",), "fut_settle": ("ts_code", "trade_date"),
-                "ft_limit": TOOL_FIELDS["ft_limit"]}
-    numeric = {"fut_daily": DAILY_FIELDS[2:], "ft_limit": ("up_limit", "down_limit")}
+    out = {"fut_daily": [], "fut_basic": []}
+    # 快照只强制主键与会被使用的数值字段；fut_basic 其余字段缺失时按行回落到配置
+    required = {"fut_daily": DAILY_FIELDS, "fut_basic": ("ts_code",)}
+    numeric = {"fut_daily": DAILY_FIELDS[2:]}
     seen = set()
     for i, call in enumerate(snap["calls"]):
         _require(call, ("tool", "params", "retrieved_at", "rows"), f"calls[{i}]")
@@ -1282,8 +1279,8 @@ def replay(config_path, out_dir):
         raise ReplayInputError(f"legs {[a, b]} share only {len(research)} usable dates in snapshot; need ≥60")
     mapping = mapping.loc[research.index[0]:research.index[-1]]
     ex = cfg["execution"]
-    make_specs = lambda fee_mult: fx.ContractSpecs(data["fut_basic"], data["fut_settle"], data["ft_limit"],
-                                                   cfg["assumptions"], fee_mult, ex["broker_margin_add"])
+    make_specs = lambda fee_mult: fx.ContractSpecs(data["fut_basic"], cfg["assumptions"], fee_mult,
+                                                   ex["broker_margin_add"])
     specs = make_specs(ex["broker_fee_multiplier"])
     split_i = int(len(research) * cfg["train_frac"])
     split_date, train_end = research.index[split_i], research.index[split_i - 1]

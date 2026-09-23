@@ -1,7 +1,7 @@
 """确定性的合约级期货数据生成器 + 本地假 zeus MCP 服务（FastMCP 风格 streamable HTTP）。
 
-生成的数据形状与 zeus fut_daily 一致；fut_basic / fut_settle / ft_limit 按
-references/zeus-mcp-interface.md 定义的接口生成，用于验证"zeus 尚未实现"的工具。
+生成的数据形状与 zeus fut_daily 一致；fut_basic 按 references/zeus-mcp-interface.md
+定义的接口生成，用于验证"zeus 尚未实现"的工具。
 """
 import json, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,7 +62,7 @@ def product_rows(product, exch, log_spot, dates, seed, carry=0.03, tick=1):
 
 
 def market(n=520, seed=3):
-    """{ 'fut_daily': rows, 'fut_basic': rows, 'fut_settle': rows, 'ft_limit': rows }，RB 与 HC 两个品种。"""
+    """{ 'fut_daily': rows, 'fut_basic': rows }，RB 与 HC 两个品种。"""
     dates = _dates(n)
     spots = spot_paths(n, seed)
     daily, basic = [], []
@@ -70,17 +70,7 @@ def market(n=520, seed=3):
         r, b = product_rows(prod, "SHF", spots[prod], dates, seed + 10 + k)
         daily += r
         basic += b
-    settle, limit = [], []
-    for r in daily:
-        # 保证金在 2022-01-01 起由 10% 调到 12%：验证按日生效（effective-dated）
-        m = 0.12 if r["trade_date"] >= "20220101" else 0.10
-        settle.append({"ts_code": r["ts_code"], "trade_date": r["trade_date"], "settle": r["settle"],
-                       "trading_fee_rate": 0.0001, "trading_fee": 0.0, "offset_today_fee": 0.0,
-                       "long_margin_rate": m, "short_margin_rate": m, "exchange": "SHF"})
-        limit.append({"ts_code": r["ts_code"], "trade_date": r["trade_date"],
-                      "pre_settle": r["pre_settle"],
-                      "up_limit": round(r["pre_settle"] * 1.07), "down_limit": round(r["pre_settle"] * 0.93)})
-    return {"fut_daily": daily, "fut_basic": basic, "fut_settle": settle, "ft_limit": limit}
+    return {"fut_daily": daily, "fut_basic": basic}
 
 
 def window_of(n=520):
@@ -101,7 +91,7 @@ def _filter(rows, args):
     return out
 
 
-def serve(data, tools=("fut_daily", "fut_basic", "fut_settle", "ft_limit"), token=TOKEN, name="ZeusMCP"):
+def serve(data, tools=("fut_daily", "fut_basic"), token=TOKEN, name="ZeusMCP"):
     """启动假 zeus（后台线程），返回 (url, server)。tools 控制 tools/list 暴露哪些工具。"""
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):

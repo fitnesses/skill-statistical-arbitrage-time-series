@@ -7,12 +7,12 @@ description: Generate a sourced, reproducible statistical-arbitrage research dos
   selection, cointegration and stationarity testing (train-window ADF + KPSS), spread
   modeling with hedge-ratio stability, mean-reversion estimation, z-score signal
   construction, integer-lot actual-contract backtesting with futures costs (per-leg
-  fees, slippage, margin, limit-price and liquidity constraints) and Sharpe significance
+  fees, slippage, margin and liquidity constraints) and Sharpe significance
   testing, and robustness risk flags. Use when the
   user asks for 统计套利研究、配对交易回测、协整检验、价差均值回归建模、信号有效性验证、回测偏差排查,
   or a one-stop stat-arb strategy due-diligence report.
 description_zh: 面向国内商品期货（跨期、跨品种价差，日线，经 zeus MCP 取数），输入候选价差，输出一份可复现、可溯源的统计套利研究报告：按时点安全的合约映射与换月、配对筛选、协整与平稳性检验（训练窗
-  ADF+KPSS+EG）、价差建模与对冲比率稳定性、均值回归估计、z-score 信号构建、真实合约整手回测（逐腿手续费、滑点、保证金、涨跌停与流动性约束）及
+  ADF+KPSS+EG）、价差建模与对冲比率稳定性、均值回归估计、z-score 信号构建、真实合约整手回测（逐腿手续费、滑点、保证金、流动性约束）及
   Sharpe 显著性检验、稳健性风险清单。适用于统计套利研究、配对交易回测、协整检验、价差均值回归建模、信号有效性验证、回测偏差排查等场景。
 metadata:
   organization: QuantSkills
@@ -65,9 +65,9 @@ The single most important job of this skill is to decide **whether an apparent e
 
 0. Check the environment once per machine: `pip install -r requirements.txt` (Python ≥ 3.10). `statsmodels` is **mandatory** — the script refuses to run without it, so every p-value is a real ADF/KPSS/Engle-Granger result, never an approximation.
 1. Normalize the input into two legs. A leg is either a product rule — `{"product": "RB", "exchange": "SHF", "select": "dominant"}` (前一交易日持仓量最大的主力) or `"select": "second"` (second leg only: the most-held contract delivering after the first leg, i.e. a calendar far leg) — or a fixed contract `"RB2501.SHF"`. Name the exact products/contracts used; ask only when the input is ambiguous.
-2. Confirm the study scope. Default to daily bars over roughly three to five years, a chronological train/test split with the most recent ~30% held out of sample, next-day-open execution with settle marking, and per-leg futures costs. A **cross-commodity** spread requires a written economic/industrial-chain `rationale` (correlation is not a reason); record how many candidates were screened in `screening`.
+2. Confirm the study scope. Default to daily bars over roughly three to five years, a chronological train/test split with the most recent ~30% held out of sample, next-day-open execution with settle marking, and per-leg futures costs. **Before running, ask the user for each product's fee and margin** — exchange fee as a rate on turnover (`fee_rate`, e.g. 0.0001 = 万分之一) and/or per lot (`fee_per_lot`, 元/手), and the margin rate (`margin_rate`, e.g. 0.10) — preferably their own broker's numbers. These have no data source; never invent them silently. If the user has no numbers, propose the exchange's published values as an explicit assumption and get confirmation. A **cross-commodity** spread requires a written economic/industrial-chain `rationale` (correlation is not a reason); record how many candidates were screened in `screening`.
 3. Read `references/statarb-guide.md` before the first dossier in a session. Use it for the stage-by-stage method map, the formulas for derived metrics, the default robustness thresholds, the report blueprint, the explicit "implemented vs. agent-supplied" split, and the appendix requirements.
-4. Fetch data **only through the zeus MCP**; never use third-party sources or connect to DolphinDB. The script calls zeus itself (`tools/list`, then `fut_basic` → `fut_daily` per contract → `fut_settle` / `ft_limit`). Tools zeus does not have yet are recorded as capability gaps and replaced by the documented fallback (see `references/zeus-mcp-interface.md`); if neither zeus nor the config supplies a required value (multiplier, tick, fee, margin) the run stops and names the zeus tool and the config key — nothing is silently set to zero or to today's value. Write a research config next to where the snapshot should live:
+4. Fetch data **only through the zeus MCP**; never use third-party sources or connect to DolphinDB. The script calls zeus itself (`tools/list`, then `fut_basic` → `fut_daily` per contract). If zeus lacks `fut_basic` it is recorded as a capability gap: contracts are probed by product+YYMM and the multiplier/tick come from `assumptions` (see `references/zeus-mcp-interface.md`). Fees and margin always come from `assumptions`; a missing required value stops the run and names the config key — nothing is silently set to zero. Write a research config next to where the snapshot should live:
    ```json
    {"snapshot": "snapshot.json", "start_date": "20210104", "end_date": "20241231",
     "legs": [{"name": "HC", "product": "HC", "exchange": "SHF", "select": "dominant"},
@@ -81,7 +81,7 @@ The single most important job of this skill is to decide **whether an apparent e
     "assumptions": {"HC": {"multiplier": 10, "price_tick": 1, "fee_rate": 0.0001, "fee_per_lot": 0, "margin_rate": 0.10},
                     "RB": {"multiplier": 10, "price_tick": 1, "fee_rate": 0.0001, "fee_per_lot": 0, "margin_rate": 0.10}}}
    ```
-   `assumptions` is only used where zeus has no value (state where each number came from); `execution` and `roll` have the defaults shown. Then:
+   `assumptions.<品种>` must give `margin_rate` and `fee_rate` and/or `fee_per_lot` for every product (state where each number came from); `multiplier`/`price_tick` are only needed while zeus lacks `fut_basic`. `execution` and `roll` have the defaults shown. Limit-up/limit-down locks are not modeled yet — say so in the report. Then:
    ```bash
    export ZEUS_MCP_URL=http://<host>:8000/mcp ZEUS_MCP_TOKEN=<token>
    python scripts/run_statarb.py --check-zeus RB2501.SHF          # 可选：真实 MCP 能力/字段检查
@@ -101,7 +101,7 @@ The single most important job of this skill is to decide **whether an apparent e
 - Report hedge-ratio stability, not just a point estimate. Show chunk-wise or rolling β and its drift; a spread whose own definition drifts is not tradable.
 - Keep statistical evidence and trading feasibility apart. Statistics run on the **research continuous series** (same-contract daily returns chained across rolls, no splice gaps); PnL comes only from the **executable backtest on actual contracts in integer lots** (signal at close t, fill at t+1, roll = close old + open new with the same lots). A stationary spread is not a tradable strategy until the executable backtest says so.
 - Contract mapping must be point-in-time safe: dominant/second selection uses only the previous day's open interest, rolls only move to later deliveries, and contracts inside the pre-delivery window are never held. Cite `rolls.csv` for every roll.
-- Model costs as evidence, not an afterthought. Per-leg fees (rate and/or per lot, open and close each charged, with the broker multiplier), slippage in ticks, margin at long/short rates, optional funding on margin; limit-locked or missing bars defer **both** legs (no legging), thin volume is flagged. Report gross and net, costs by type, drawdown, turnover, round trips, margin used, return on margin, and the stress scenario (fees ×2, slippage +1 tick).
+- Model costs as evidence, not an afterthought. Per-leg fees (rate and/or per lot, open and close each charged, with the broker multiplier), slippage in ticks, margin at the user-specified rate, optional funding on margin; a missing bar on either leg defers **both** legs (no legging), thin volume is flagged; limit locks are not modeled (disclose as a limitation). Report gross and net, costs by type, drawdown, turnover, round trips, margin used, return on margin, and the stress scenario (fees ×2, slippage +1 tick).
 - Report Sharpe with its significance. Give the approximate t-statistic and an overlap-deflated effective t (positions held ~half-life days are autocorrelated). A Sharpe with |t| < ~2 is not distinguishable from zero — never present it as an edge.
 - Watch for leaked beta. When the hedge ratio is low and both legs co-move strongly, spread PnL may contain directional market/sector exposure; recommend or run a factor regression of spread returns before concluding the edge is alpha.
 - Treat empty or insufficient results as evidence. State "无数据" or "样本不足" with the method name, window, and usable sample size instead of silently omitting the section.
@@ -113,8 +113,8 @@ The single most important job of this skill is to decide **whether an apparent e
 
 - `references/statarb-guide.md`: stage-by-stage method map, derived-metric formulas, robustness/risk rules, the implemented-vs-agent-supplied split, report blueprint, and final QA checklist.
 - `references/sample_report_futures_calendar.md`, `references/sample_report_futures_cross.md`: complete futures dossiers generated from the synthetic contract fixtures (not market data) — use them as the target shape of a report; `sample_report_{greenlight,reject,betadrift}.md` are statistical self-test outputs.
-- `references/zeus-mcp-interface.md`: the zeus MCP tool contract (`fut_daily` live; `fut_basic`, `fut_settle`, `ft_limit` to be implemented), required fields, and what the script does while each tool is missing.
-- `scripts/futures.py`: futures rules — contract-code parsing, point-in-time dominant/second mapping and roll events, research continuous series, contract specs (zeus first, config assumptions second, else error), and the integer-lot executable backtest with fees, slippage, margin, limit-lock deferral and liquidity flags.
+- `references/zeus-mcp-interface.md`: the zeus MCP tool contract (`fut_daily` live; `fut_basic` to be implemented), required fields, and what the script does while each tool is missing.
+- `scripts/futures.py`: futures rules — contract-code parsing, point-in-time dominant/second mapping and roll events, research continuous series, contract specs (multiplier/tick from zeus `fut_basic` or config; fees and margin from config; else error), and the integer-lot executable backtest with fees, slippage, margin, missing-bar deferral and liquidity flags.
 - `scripts/run_statarb.py`: runnable backbone — research config validation, zeus fetch into an immutable snapshot (`--fetch`), replay (`--config`), `--check-zeus`, or synthetic data for self-test; tests cointegration on the training window (ADF + KPSS, with full/OOS cross-checks), estimates the hedge ratio plus its returns-space stability (Chow-style half-sample β break test + noise-corrected chunk dispersion) and half-life, builds an adaptive z-score signal, runs a bias-controlled gross/net backtest with per-leg futures fees + slippage and margin usage, computes Sharpe with a t-statistic and overlap-deflated effective t, runs two-level factor attribution (strategy-PnL alpha/beta and spread-return market-neutrality), applies the robustness rules, and writes the Markdown report. Built-in offline self-test: `python scripts/run_statarb.py --source synthetic --mode {coint,nocoint,strong,inversion,leaked,drift}` exercises each verdict branch (e.g. `strong`→green light, `inversion`→IS/OOS-mismatch flag, `leaked`→spread-not-market-neutral flag, `drift`→hedge-ratio-break flag) without network access.
 
 ## Quality Bar

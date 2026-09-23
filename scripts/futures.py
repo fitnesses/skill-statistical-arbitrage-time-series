@@ -10,10 +10,10 @@
   3. 研究序列 vs 可执行价格：研究用连续对数价 = 累加“当日所持合约自身的日收益”，
      换月日不产生拼接跳空，只用于统计诊断；回测盈亏一律用真实合约价格。
   4. 可执行回测：整手、真实合约、成交价/盯市价可配，手续费（费率+每手）与滑点（跳）
-     逐笔计，保证金按多空费率逐日计；一腿涨跌停封板或无行情 → 两腿都不成交（顺延），
-     成交量不足按参与率上限标记。
+     逐笔计，保证金按用户指定的保证金率逐日计；一腿当日无行情 → 两腿都不成交（顺延），
+     成交量不足按参与率上限标记。涨跌停暂不建模（一字板照常按假设价成交，报告披露）。
 """
-import bisect, re
+import re
 
 import numpy as np
 import pandas as pd
@@ -158,30 +158,24 @@ def research_prices(tabs, mapping, field="close"):
     return pd.DataFrame(out, index=mapping.index)
 
 
-# ---------------- 合约参数（zeus 优先，配置假设兜底，缺失即报错） ----------------
+# ---------------- 合约参数（乘数/跳价：zeus fut_basic 优先；费率/保证金：用户配置） ----------------
 class ContractSpecs:
-    """合约参数来源优先级：zeus fut_basic（乘数/最小变动价位）、fut_settle（按日生效的费率/保证金）、
-    ft_limit（涨跌停价）→ 配置 assumptions[品种]（整段常数，报告披露为假设）→ 缺失报错。"""
+    """乘数、最小变动价位：zeus fut_basic → 配置 assumptions[品种] → 缺失报错。
+    手续费率/每手手续费/保证金率：由用户在配置 assumptions[品种] 中指定（整段常数），缺失报错。"""
 
-    def __init__(self, basic, settle, limits, assumptions, broker_fee_multiplier=1.0,
-                 broker_margin_add=0.0):
+    def __init__(self, basic, assumptions, broker_fee_multiplier=1.0, broker_margin_add=0.0):
         self.basic = {r["ts_code"]: r for r in basic}
         self.assumptions = assumptions or {}
         self.fee_mult, self.margin_add = broker_fee_multiplier, broker_margin_add
-        self.settle = {}
-        for r in sorted(settle, key=lambda r: r["trade_date"]):
-            self.settle.setdefault(r["ts_code"], []).append((pd.Timestamp(r["trade_date"]), r))
-        self.limits = {(r["ts_code"], pd.Timestamp(r["trade_date"])): (r["up_limit"], r["down_limit"])
-                       for r in limits}
         self.used = {}       # (字段, 来源) → 合约日数，用于披露
         self._cache = {}
 
-    def _assume(self, code, field, tool):
+    def _config(self, code, field, tool=None):
         prod = parse_code(code)[0]
         v = self.assumptions.get(prod, {}).get(field)
         if v is None:
-            raise MissingData(f"{code}: missing {field} — zeus {tool} has no value for it and "
-                              f"config assumptions.{prod}.{field} is not set")
+            via = f"zeus {tool} has no value for it and " if tool else ""
+            raise MissingData(f"{code}: missing {field} — {via}config assumptions.{prod}.{field} is not set")
         return v
 
     def _count(self, field, src):
@@ -197,22 +191,19 @@ class ContractSpecs:
         src = {}
         b = self.basic.get(code, {})
         out = {}
-        for field, key in (("multiplier", "multiplier"), ("price_tick", "price_tick")):
-            if b.get(key) is not None:
-                out[field], src[field] = float(b[key]), "fut_basic"
+        for field in ("multiplier", "price_tick"):
+            if b.get(field) is not None:
+                out[field], src[field] = float(b[field]), "fut_basic"
             else:
-                out[field], src[field] = float(self._assume(code, field, "fut_basic")), "assumption"
-        rows = self.settle.get(code, [])
-        i = bisect.bisect_right(rows, day, key=lambda x: x[0])   # 最近一条 trade_date ≤ day（as-of）
-        row = rows[i - 1][1] if i else None
-        pairs = (("fee_rate", "trading_fee_rate", "fee_rate"), ("fee_per_lot", "trading_fee", "fee_per_lot"),
-                 ("margin_long", "long_margin_rate", "margin_rate"),
-                 ("margin_short", "short_margin_rate", "margin_rate"))
-        for field, zkey, akey in pairs:
-            if row is not None and row.get(zkey) is not None:
-                out[field], src[field] = float(row[zkey]), "fut_settle"
-            else:
-                out[field], src[field] = float(self._assume(code, akey, "fut_settle")), "assumption"
+                out[field], src[field] = float(self._config(code, field, "fut_basic")), "config"
+        prod = parse_code(code)[0]
+        cfg = self.assumptions.get(prod, {})
+        if cfg.get("fee_rate") is None and cfg.get("fee_per_lot") is None:
+            self._config(code, "fee_rate")                     # 两者都没给 → 报错
+        out["fee_rate"], out["fee_per_lot"] = float(cfg.get("fee_rate") or 0), float(cfg.get("fee_per_lot") or 0)
+        out["margin_long"] = out["margin_short"] = float(self._config(code, "margin_rate"))
+        for f in ("fee_rate", "fee_per_lot", "margin_long", "margin_short"):
+            src[f] = "config"
         out["fee_rate"] *= self.fee_mult
         out["fee_per_lot"] *= self.fee_mult
         out["margin_long"] += self.margin_add
@@ -222,38 +213,14 @@ class ContractSpecs:
         out["source"] = src
         return out
 
-    def limit(self, code, day):
-        return self.limits.get((code, day))
-
 
 # ---------------- 可执行回测 ----------------
-def _blocked(tabs, code, day, qty, specs):
-    """返回阻塞原因或 None。优先用 zeus 涨跌停价；缺失时按 OHLC 一字板推断。"""
-    try:
-        hi, lo = tabs["high"].at[day, code], tabs["low"].at[day, code]
-    except KeyError:
+def _blocked(tabs, code, day, field):
+    """当日该合约无可用成交价 → "no_bar"；否则 None。
+    ponytail: 涨跌停暂不建模（一字板照常成交），需要时按 pre_settle×涨跌停幅度判定封板。"""
+    tab = tabs[field]
+    if code not in tab.columns or day not in tab.index or np.isnan(tab.at[day, code]):
         return "no_bar"
-    if np.isnan(hi) or np.isnan(lo):
-        return "no_bar"
-    lim = specs.limit(code, day)
-    if lim is not None:
-        up, down = lim
-        if qty > 0 and lo >= up:
-            return "limit_up_locked"
-        if qty < 0 and hi <= down:
-            return "limit_down_locked"
-        return None
-    if hi != lo:
-        return None
-    pre = tabs.get("pre_settle")
-    ps = pre.at[day, code] if pre is not None and code in pre.columns else np.nan
-    c = tabs["close"].at[day, code]
-    if np.isnan(ps) or c == ps:
-        return "one_price_bar(inferred)"
-    if qty > 0 and c > ps:
-        return "limit_up_locked(inferred)"
-    if qty < 0 and c < ps:
-        return "limit_down_locked(inferred)"
     return None
 
 
@@ -266,7 +233,7 @@ def executable_backtest(tabs, mapping, target, beta, specs, ex, split_date=None)
     a, b = mapping.columns
     dates = list(mapping.index)
     exec_tab, mark_tab = tabs[ex["exec_price"]], tabs[ex["mark_price"]].ffill()
-    close = tabs["close"]
+    close = tabs["close"].ffill()          # 手数按决策日及之前最近一个收盘价（不看未来）
     sign_b = -1 if beta > 0 else 1
     hold, cur_pos, lots = {}, 0, None
     trades, daily, events, entries = [], [], [], []
@@ -290,7 +257,7 @@ def executable_backtest(tabs, mapping, target, beta, specs, ex, split_date=None)
             desired = dict(hold)
         orders = {c: desired.get(c, 0) - hold.get(c, 0) for c in set(desired) | set(hold)}
         orders = {c: q for c, q in orders.items() if q != 0}
-        blocks = {c: r for c, q in orders.items() if (r := _blocked(tabs, c, d, q, specs))}
+        blocks = {c: r for c in orders if (r := _blocked(tabs, c, d, ex["exec_price"]))}
         fills, fees, slip = [], 0.0, 0.0
         if blocks:
             events.append({"date": d, "kind": "deferred",

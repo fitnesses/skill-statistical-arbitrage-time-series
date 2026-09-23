@@ -1,6 +1,6 @@
 # statistical-arbitrage-time-series
 
-An Agent Skill for reproducible, sourced statistical-arbitrage research on Chinese commodity futures (calendar and cross-commodity spreads). Data comes only from the zeus MCP and is stored as an immutable, replayable snapshot. It covers point-in-time contract mapping and rolls, training-window ADF/KPSS/Engle-Granger tests, spread and hedge-ratio modeling, mean reversion, an integer-lot backtest on actual contracts with futures costs (per-leg fees, slippage, margin, limit-price and liquidity constraints), significance checks, and robustness risks. Statistical evidence and trading feasibility get separate verdicts.
+An Agent Skill for reproducible, sourced statistical-arbitrage research on Chinese commodity futures (calendar and cross-commodity spreads). Data comes only from the zeus MCP and is stored as an immutable, replayable snapshot. It covers point-in-time contract mapping and rolls, training-window ADF/KPSS/Engle-Granger tests, spread and hedge-ratio modeling, mean reversion, an integer-lot backtest on actual contracts with futures costs (per-leg fees, slippage, user-specified margin, and liquidity constraints), significance checks, and robustness risks. Statistical evidence and trading feasibility get separate verdicts.
 
 This project is for research and method validation only. It makes no return claims, is not investment advice, and does not imply official endorsement by QuantSkills or any platform.
 
