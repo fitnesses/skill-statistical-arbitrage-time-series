@@ -148,6 +148,34 @@ def seasonality_test(spread):
     return float(h), float(p), len(groups)
 
 
+def seasonal_months(spread):
+    """逐月检验（只应在训练窗上调用）：每个月的价差日变化 vs 其余月份，Mann-Whitney U，Holm 校正。
+    返回 {table: [{month, n, median_change, median_level_dev, p, p_holm}], months, significant}；
+    有校正后显著的月份 → 这些月份；否则取 p 最小的一个月（仅作压力测试）。月份不足 3 个返回 None。"""
+    from scipy.stats import mannwhitneyu
+    s = pd.Series(np.asarray(spread, float), index=spread.index).dropna()
+    d = s.diff().dropna()
+    dev = s - s.mean()
+    rows = []
+    for m, g in d.groupby(d.index.month):
+        rest = d[d.index.month != m]
+        if len(g) < 10 or len(rest) < 10:
+            continue
+        rows.append({"month": int(m), "n": int(len(g)), "median_change": float(g.median()),
+                     "median_level_dev": float(dev[dev.index.month == m].median()),
+                     "p": float(mannwhitneyu(g, rest, alternative="two-sided").pvalue)})
+    if len(rows) < 3:
+        return None
+    order = sorted(range(len(rows)), key=lambda i: rows[i]["p"])      # Holm 逐步校正
+    running = 0.0
+    for rank, i in enumerate(order):
+        running = max(running, min(1.0, (len(rows) - rank) * rows[i]["p"]))
+        rows[i]["p_holm"] = running
+    sig = sorted(r["month"] for r in rows if r["p_holm"] < 0.05)
+    return {"table": sorted(rows, key=lambda r: r["month"]), "significant": bool(sig),
+            "months": sig or [rows[order[0]]["month"]]}
+
+
 def eg_test(log_a, log_b):
     """Engle-Granger 协整（H0: 不协整），MacKinnon p 值；只应在训练窗上调用。返回 (统计量, p)。"""
     with warnings.catch_warnings():
@@ -555,6 +583,18 @@ def _exe_ok(oos, flags):
                 and not any(f[0] == "🔴 高" for f in flags))
 
 
+def _season_months_line(sm):
+    if not sm:
+        return "逐月检验：训练窗月份不足，未做。"
+    top = sorted(sm["table"], key=lambda r: r["p"])[:3]
+    detail = "；".join(f"{r['month']}月 p={r['p']:.3f}（Holm {r['p_holm']:.3f}），日变化中位数 {r['median_change']:+.4f}"
+                      for r in top)
+    head = (f"显著月份：{'、'.join(f'{m}月' for m in sm['months'])}" if sm["significant"]
+            else f"无校正后显著的月份（p 最小为 {sm['months'][0]}月，敏感性分析中作为压力测试剔除）")
+    return (f"逐月检验（每月价差日变化 vs 其余月份，Mann-Whitney U，Holm 校正，仅训练窗）：{head}。"
+            f"p 最小的月份：{detail}。")
+
+
 def _stat_tradable(s):
     f, attr = s["bt"], s["attr"]
     alpha_ok = (attr is None) or (abs(attr["t_alpha"]) >= 1.96)
@@ -647,6 +687,7 @@ def write_report(a, b, source, px, s, flags, path, header=None, insert=None):
         (f"季节性（训练窗价差日变化按月 Kruskal-Wallis，{s['season'][2]} 个月）：H={s['season'][0]:.2f}，"
          f"p={_fmt_p(s['season'][1], 0.001, 0.99)} → {'各月分布存在显著差异，需按季节拆分验证' if s['season'][1] < 0.05 else '未见显著季节性'}。"
          if s.get("season") else "季节性：训练窗可用月份不足 3 个（每月需 ≥10 个观测），未检验。"),
+        _season_months_line(s.get("season_months")),
 
         "\n## 7. 回测与偏差控制（研究口径：价差对数收益；毛 vs 净；样本内 vs 样本外）",
         "| 口径 | Sharpe | t | 最大回撤 | 累计价差收益 |",
@@ -722,7 +763,8 @@ def run_stats(px, legs, mkt=None, window=None, train_frac=0.70):
          "eg": eg_test(log[a].iloc[:split], log[b].iloc[:split]),
          "hl_tr": bt["hl_train"], "hl_full": half_life(spread),
          "betastab": beta_stability(log[a].iloc[:split], log[b].iloc[:split]),
-         "season": seasonality_test(spread.iloc[:split]), "attr": None, "attr_sp": None}
+         "season": seasonality_test(spread.iloc[:split]),
+         "season_months": seasonal_months(spread.iloc[:split]), "attr": None, "attr_sp": None}
     if mkt is not None:
         s["attr"] = factor_attribution(bt["oos_net_pnl"], mkt)                  # 策略收益层
         s["attr_sp"] = factor_attribution(spread.diff().iloc[split:], mkt)      # 价差中性层
@@ -963,7 +1005,11 @@ def futures_report_parts(a, b, s, ctx, flags):
     sec2 += fig("research_vs_exec", "研究序列与真实价格",
                 "灰线是真实合约收盘价，换月处（竖线）有跳空；彩线是研究用连续序列，同一位置应平滑无跳空。两者日间涨跌应一致，"
                 "水平差随每次换月逐步累积（展期收益：期限结构升水/贴水），这是正常的，不代表数据有误。")
-    sec6 = fig("rolling_stability", "滚动稳定性",
+    sec6 = fig("seasonality", "分月箱线图",
+               "上：训练窗价差日变化按月分布（季节性检验的对象）；下：价差水平相对训练期均值的偏离按月分布。"
+               "各月箱体应大致重叠；橙色为逐月检验挑出的月份（显著，或 p 最小仅作压力测试）。"
+               "若某几个月的箱体整体偏上/偏下，说明价差有季节规律，全样本结论可能被这几个月主导，参见第 11 章“剔除季节月”。") + \
+        fig("rolling_stability", "滚动稳定性",
                 "滚动 β 应围绕训练期 β 窄幅波动；半衰期显著拉长（顶部 ▲ 表示该窗口价差不回归、半衰期为无穷）"
                 "或 ADF p 长期高于 0.05 的区段，说明价差关系在该时期减弱或失效（区制变化的直观信号）。"
                 "灰底之外为训练期内的滚动诊断，灰底内为样本外，均只作诊断、不参与参数估计。") + sec6
@@ -1498,7 +1544,7 @@ def rolling_stability(research, window=ROLLING_WINDOW, step=5):
     return pd.DataFrame(rows, index=pd.DatetimeIndex(idx), columns=["beta", "half_life", "adf_p"])
 
 
-def _core(tabs, data, cfg, exclude=None, train_frac=None, ex=None):
+def _core(tabs, data, cfg, exclude=None, train_frac=None, ex=None, blocked_months=None):
     """映射/换月 → 研究序列统计证据 → 整手真实合约回测（含压力情景）。replay 与敏感性分析共用。"""
     legs = cfg["legs"]
     exclude = cfg["exclude_months"] if exclude is None else exclude
@@ -1526,6 +1572,9 @@ def _core(tabs, data, cfg, exclude=None, train_frac=None, ex=None):
     st = run_stats(px, research_legs, None, cfg["window"] or None, train_frac)
     bt = st["bt"]
     target = bt["pos"].reindex(mapping.index).ffill().fillna(0)
+    if blocked_months:          # 剔除月份内不持仓：次一交易日落在这些月份的信号一律置 0（进入该月前平仓，月内不开仓）
+        nxt = pd.Series(mapping.index.month, index=mapping.index).shift(-1)
+        target = target.where(~nxt.isin(blocked_months), 0.0)
     exe = fx.executable_backtest(tabs, mapping, target, bt["beta"], specs, ex, split_date)
     stress_ex = {**ex, "slippage_ticks": ex["slippage_ticks"] + 1}     # 压力：手续费×2、滑点+1 跳
     stress = fx.executable_backtest(tabs, mapping, target, bt["beta"], make_specs(2 * ex["broker_fee_multiplier"]),
@@ -1559,6 +1608,12 @@ def sensitivity(tabs, data, cfg, base, ctx_base):
                 ("A腿20手", {"ex": {**ex, "base_lots": 20}}, "与基准相同" if ex["base_lots"] == 20 else None),
                 (f"交割前{cfg['exclude_months'] + 1}个月换出", {"exclude": cfg["exclude_months"] + 1},
                  None if rolls_apply else "固定合约不换月，此项不起作用")]
+    sm = base["s"].get("season_months")
+    if sm:
+        tag = "、".join(str(m) for m in sm["months"]) + "月" + ("" if sm["significant"] else "，未显著·压力测试")
+        variants.append((f"剔除季节月（{tag}）", {"blocked_months": sm["months"]}, None))
+    else:
+        variants.append(("剔除季节月", {}, "训练窗月份不足，无法逐月检验"))
     rows = []
     b_stat, b_exe, b_flags = _verdicts(base, ctx_base, cfg)
     for name, kw, skip in [("基准", None, None)] + variants:
@@ -1766,7 +1821,8 @@ def replay(config_path, out_dir):
             "z": bt["z"], "entry": ENTRY, "exit": EXIT, "stop": STOP, "split": split_date, "daily": exe["daily"],
             "stress_daily": stress["daily"], "mapping": mapping, "rolls": rolls, "exec_close": exec_close,
             "research": research, "metrics": exe["metrics"], "rolling": rolling, "rolling_window": ROLLING_WINDOW,
-            "end": mapping.index[-1],
+            "end": mapping.index[-1], "spread_train": bt["spread"].iloc[:bt["split"]],
+            "season_months": s.get("season_months"),
             "beta": bt["beta"]})
     ctx["figures"] = figures
     report = out_dir / "report.md"

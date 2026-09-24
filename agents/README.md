@@ -156,7 +156,7 @@ cp -r skill-statistical-arbitrage-time-series   .cursor/skills/statistical-arbit
 → 未做的分析、数据限制与假设 → 敏感性分析 → 自动对账
 ```
 
-产物：`report.md` 与自包含 `report.html`（首页：两项结论 + 关键数字 + 对账/敏感性状态 + 总览图；正文每张图附“看图要点”）、`figures/*.png`（总览、z-score 与成交、净值与回撤、换月时间线、研究序列 vs 真实价格、成本瀑布、滚动稳定性）、`manifest.json`（run_id、哈希、MCP 调用、能力缺口、参数来源、拟合参数、指标、对账、敏感性）、`mapping.csv`、`rolls.csv`、`trades.csv`、`daily.csv`、`events.csv`。报告第 11 章为敏感性分析，第 12 章为自动对账。
+产物：`report.md` 与自包含 `report.html`（首页：两项结论 + 关键数字 + 对账/敏感性状态 + 总览图；正文每张图附“看图要点”）、`figures/*.png`（总览、z-score 与成交、净值与回撤、换月时间线、研究序列 vs 真实价格、成本瀑布、滚动稳定性、分月箱线图）、`manifest.json`（run_id、哈希、MCP 调用、能力缺口、参数来源、拟合参数、指标、对账、敏感性）、`mapping.csv`、`rolls.csv`、`trades.csv`、`daily.csv`、`events.csv`。报告第 11 章为敏感性分析，第 12 章为自动对账。
 
 风险信号清单为表格：`风险等级 | 信号 | 触发规则 | 证据 | 窗口/样本 | 所用检验或公式`。
 方法附录为表格：`分析阶段 | 数据来源/方法 | 查询或样本窗口 | 可用样本量 | 关键统计量/参数 | 备注`（含"未做项"清单）。

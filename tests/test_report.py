@@ -14,7 +14,7 @@ CROSS = {"legs": [{"name": "HC", "product": "HC", "exchange": "SHF", "select": "
                   {"name": "RB", "product": "RB", "exchange": "SHF", "select": "dominant"}],
          "rationale": "热卷与螺纹同为钢坯下游成材", "assumptions": COSTS}
 FIGS = ("overview", "zscore_signals", "equity_drawdown", "roll_timeline", "research_vs_exec",
-        "cost_waterfall", "rolling_stability")
+        "cost_waterfall", "rolling_stability", "seasonality")
 
 
 @pytest.fixture(scope="module")
@@ -222,3 +222,44 @@ def test_overview_stacks_four_charts_vertically(run):
     _, out, _ = run
     h, w = mpimg.imread(out / "figures" / "overview.png").shape[:2]
     assert h > w                                   # 4 张图竖排
+
+
+def test_seasonal_months_detects_an_injected_month_on_training_data():
+    idx = pd.bdate_range("2015-01-01", periods=2000)
+    rng = np.random.default_rng(7)
+    d = rng.normal(0, 0.01, len(idx)) + np.where(idx.month == 3, 0.006, 0.0)   # 3 月系统性上行
+    spread = pd.Series(np.cumsum(d), index=idx)
+    res = rs.seasonal_months(spread)
+    assert 3 in res["months"] and res["significant"]      # 强月份会抬高“其余月份”基准，邻近月份可能擦边入选
+    assert {r["month"] for r in res["table"]} == set(range(1, 13))
+
+
+def test_seasonal_months_falls_back_to_the_most_extreme_month_when_nothing_is_significant():
+    idx = pd.bdate_range("2019-01-01", periods=700)
+    spread = pd.Series(np.cumsum(np.random.default_rng(3).normal(0, 0.01, len(idx))), index=idx)
+    res = rs.seasonal_months(spread)
+    assert len(res["months"]) == 1 and not res["significant"]
+
+
+def test_blocked_months_keep_the_executable_backtest_flat(tmp_path):
+    url, srv = zf.serve(zf.market())
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"snapshot": "snapshot.json", "start_date": START, "end_date": END, **CROSS,
+                               "report": {"charts": False, "sensitivity": False}}, ensure_ascii=False), encoding="utf-8")
+    rs.fetch_snapshot(cfg, url, zf.TOKEN)
+    srv.shutdown()
+    c = rs.load_config(cfg)
+    data = rs.load_snapshot(json.loads((tmp_path / "snapshot.json").read_text(encoding="utf-8")))
+    tabs = rs.fx.bar_tables(data["fut_daily"])
+    core = rs._core(tabs, data, c, blocked_months=[1, 2, 3])
+    daily = core["exe"]["daily"]
+    assert (daily.spread_pos[daily.index.month.isin([1, 2, 3])] == 0).all()
+    assert (daily.spread_pos != 0).any()
+
+
+def test_sensitivity_includes_the_seasonal_exclusion_variant(run):
+    _, out, man = run
+    row = next(r for r in man["sensitivity"] if r["variant"].startswith("剔除季节月"))
+    assert "stat_ok" in row or row.get("skipped")
+    text = (out / "report.md").read_text(encoding="utf-8")
+    assert "剔除季节月" in text and "逐月检验" in text and "](figures/seasonality.png)" in text

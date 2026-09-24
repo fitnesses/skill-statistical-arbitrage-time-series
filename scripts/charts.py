@@ -242,6 +242,29 @@ def draw_rolling(axes, p):
         ax.legend(loc="upper left")
 
 
+def draw_seasonality(axes, p):
+    """训练窗：上=价差日变化按月箱线图（季节性检验对象），下=价差水平相对训练均值的偏离按月。"""
+    s = p["spread_train"].dropna()
+    flagged = set((p.get("season_months") or {}).get("months", []))
+    series = [(axes[0], s.diff().dropna(), "Training window: daily spread change by calendar month"),
+              (axes[1], s - s.mean(), "Training window: spread level minus training mean, by calendar month")]
+    for ax, x, title in series:
+        months = [m for m in range(1, 13) if (x.index.month == m).sum() > 0]
+        data = [x[x.index.month == m].values for m in months]
+        bp = ax.boxplot(data, positions=months, widths=0.6, patch_artist=True, showfliers=False,
+                        medianprops=dict(color=INK, lw=1.2), whiskerprops=dict(color=MUTED, lw=0.8),
+                        capprops=dict(color=MUTED, lw=0.8))
+        for m, box in zip(months, bp["boxes"]):
+            box.set(facecolor=S2 if m in flagged else S1_LIGHT, edgecolor=SURFACE, lw=1.5)
+        ax.axhline(0, color=BASE, lw=0.8)
+        ax.set_xticks(range(1, 13), ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
+        ax.grid(axis="x", visible=False)
+        ax.set_title(title)
+    from matplotlib.patches import Patch
+    axes[0].legend(handles=[Patch(facecolor=S1_LIGHT, label="other months"),
+                            Patch(facecolor=S2, label="month flagged by per-month test")], loc="upper left")
+
+
 # ---------------- 输出 ----------------
 def render(out_dir, p):
     """p：回放产出的数据。返回 {图名: 相对路径}。"""
@@ -278,6 +301,10 @@ def render(out_dir, p):
     fig, axes = plt.subplots(3, 1, figsize=(11, 7), sharex=True)
     draw_rolling(axes, p)
     save("rolling_stability", fig)
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7), gridspec_kw={"hspace": 0.45})
+    draw_seasonality(axes, p)
+    save("seasonality", fig)
 
     fig = plt.figure(figsize=(11, 15))                  # 4 行 1 列：一行一张，横向空间留给时间轴
     g = fig.add_gridspec(4, 1, height_ratios=[1.1, 1.1, 0.75, 0.95], hspace=0.6)

@@ -83,7 +83,7 @@ Paths such as `scripts/run_statarb.py` are relative to **this skill's directory*
     "assumptions": {"HC": {"multiplier": 10, "price_tick": 1, "fee_rate": 0.0001, "fee_per_lot": 0, "margin_rate": 0.10},
                     "RB": {"multiplier": 10, "price_tick": 1, "fee_rate": 0.0001, "fee_per_lot": 0, "margin_rate": 0.10}}}
    ```
-   `"report": {"charts": true, "sensitivity": true}` (defaults) controls the figures and the sensitivity table (same snapshot re-run with fees ×2, slippage +1 tick, train 60%/80%, 20 lots, one more month of pre-delivery exclusion); every run also reconciles its own CSVs (net = gross − costs, fees/slippage/gross PnL recomputed, roll decision days, training β and EG p recomputed).
+   `"report": {"charts": true, "sensitivity": true}` (defaults) controls the figures and the sensitivity table (same snapshot re-run with fees ×2, slippage +1 tick, train 60%/80%, 20 lots, one more month of pre-delivery exclusion, excluding the training window's seasonal months); every run also reconciles its own CSVs (net = gross − costs, fees/slippage/gross PnL recomputed, roll decision days, training β and EG p recomputed).
    `assumptions.<品种>` must give `margin_rate` and `fee_rate` and/or `fee_per_lot` for every product (state where each number came from); `multiplier`/`price_tick` are only needed while zeus lacks `fut_basic`. `execution` and `roll` have the defaults shown. Limit-up/limit-down locks are not modeled yet — say so in the report. Then:
    ```bash
    uv run <skill-dir>/scripts/run_statarb.py --check-zeus RB2501.SHF    # 可选：zeus 连接与字段检查
