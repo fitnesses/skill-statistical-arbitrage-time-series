@@ -1477,7 +1477,11 @@ def main():
             print(json.dumps(res, ensure_ascii=False, indent=2))
             raise SystemExit(0 if res["ok"] else 1)
         if args.config:
-            if args.fetch:
+            cfg = load_config(args.config) if args.fetch else None
+            existing = cfg and cfg["path"].parent / cfg["snapshot"]
+            if args.fetch and existing.exists():       # 快照不可变：不覆盖，直接用它回放
+                print(f"[fetch] 快照已存在，直接用它回放：{existing}（如需重新取数，请在配置里换一个 snapshot 文件名）")
+            elif args.fetch:
                 url, headers = zeus()
                 snap = fetch_snapshot(args.config, url, headers=headers)
                 n = sum(len(c["rows"]) for c in snap["calls"] if c["tool"] == "fut_daily")

@@ -177,3 +177,15 @@ def test_no_trade_rows_with_null_ohlc_are_accepted(case):
     edit_json(case / "mcp_snapshot_hc_rb.json", blank)
     man = run(case)
     assert man["data_window"]["n_research_days"] == 319
+
+
+def test_cli_fetch_with_existing_snapshot_replays_it_instead_of_failing(case, monkeypatch, capsys):
+    snap = case / "mcp_snapshot_hc_rb.json"
+    before = snap.read_bytes()
+    monkeypatch.setattr(rs, "resolve_zeus", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应联网")))
+    monkeypatch.setattr("sys.argv", ["run_statarb.py", "--config", str(case / "replay_config.json"),
+                                     "--fetch", "--out-dir", str(case / "out")])
+    rs.main()
+    out = capsys.readouterr().out
+    assert "快照已存在" in out and "[done]" in out
+    assert snap.read_bytes() == before and (case / "out" / "report.md").exists()
