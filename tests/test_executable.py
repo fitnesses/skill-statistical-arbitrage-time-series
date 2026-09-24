@@ -134,3 +134,14 @@ def test_direct_reversal_records_entry_and_round_trip():
     res = run(rows(), [1, -1, -1, 0])
     assert len(res["entries"]) == 2
     assert res["metrics"]["all"]["round_trips"] == 2
+
+
+def test_zero_volume_day_defers_both_legs_even_with_a_quoted_settle():
+    rs = rows()
+    for r in rs:
+        if (r["ts_code"], r["trade_date"]) == ("BB2405.SHF", D[1]):
+            r.update(open=None, high=None, low=None, vol=0.0)        # 无成交日：交易所只给收盘/结算
+    res = run(rs, [1, 1, 1, 0], ex={**EX, "exec_price": "settle"})
+    tr, ev = res["trades"], res["events"]
+    assert tr[tr.date == pd.Timestamp(D[1])].empty
+    assert "no_trade" in ev[(ev.kind == "deferred") & (ev.date == pd.Timestamp(D[1]))].detail.iloc[0]

@@ -7,11 +7,12 @@ This project is for research and method validation only. It makes no return clai
 Start with [`SKILL.md`](SKILL.md), the [research guide](references/statarb-guide.md), the [zeus MCP interface](references/zeus-mcp-interface.md), and the scripts ([`run_statarb.py`](scripts/run_statarb.py), [`futures.py`](scripts/futures.py)):
 
 ```bash
-pip install -r requirements.txt            # Python >= 3.10; statsmodels is mandatory
-export ZEUS_MCP_URL=http://<host>:8000/mcp ZEUS_MCP_TOKEN=<token>
-python scripts/run_statarb.py --config run1/config.json --fetch --out-dir run1
-python scripts/run_statarb.py --source synthetic --mode strong   # offline self-test
-python -m pytest tests -q                                        # deterministic tests
+# uv installs the inline-declared dependencies on first run (~30 s); zeus connection details are reused from
+# Claude Code's zeus MCP config, or copy .env.example to .env in your workspace
+uv run scripts/run_statarb.py --check-zeus RB2501.SHF
+uv run scripts/run_statarb.py --config statarb_runs/hc_rb/config.json --fetch --out-dir statarb_runs/hc_rb/out
+uv run scripts/run_statarb.py --source synthetic --mode strong   # offline self-test
+uv run --with pytest --with-requirements requirements.txt pytest tests -q   # deterministic tests
 ```
 
 Runtime entrypoints for Claude Code, Codex, Cursor, Hermes, and OpenClaw are documented in [`agents/portable-loader.md`](agents/portable-loader.md).

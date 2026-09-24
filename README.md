@@ -13,11 +13,12 @@
 - English: [`README.en.md`](README.en.md)
 
 ```bash
-pip install -r requirements.txt            # Python ≥ 3.10；statsmodels 为必需
-export ZEUS_MCP_URL=http://<host>:8000/mcp ZEUS_MCP_TOKEN=<token>
-python scripts/run_statarb.py --config run1/config.json --fetch --out-dir run1
-python scripts/run_statarb.py --source synthetic --mode strong   # 离线自测
-python -m pytest tests -q                                        # 确定性测试
+# 依赖由 uv 按脚本内联声明自动安装（首次约 30 秒）；zeus 连接信息自动复用 Claude Code 的 zeus MCP 配置，
+# 或把 .env.example 复制为工作目录下的 .env 填写
+uv run scripts/run_statarb.py --check-zeus RB2501.SHF
+uv run scripts/run_statarb.py --config statarb_runs/hc_rb/config.json --fetch --out-dir statarb_runs/hc_rb/out
+uv run scripts/run_statarb.py --source synthetic --mode strong   # 离线自测
+uv run --with pytest --with-requirements requirements.txt pytest tests -q   # 确定性测试
 ```
 
 依赖安装与 Claude Code、Codex、Cursor、Hermes、OpenClaw 的入口说明见 [`agents/portable-loader.md`](agents/portable-loader.md)。

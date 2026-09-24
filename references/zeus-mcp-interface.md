@@ -25,7 +25,8 @@
 | 字段 | 必需 | 说明 |
 |---|---|---|
 | `ts_code`, `trade_date` | ✔ | 主键；同一 (ts_code, trade_date) 不得重复 |
-| `open`, `high`, `low`, `close`, `settle` | ✔ | 价格（元/计价单位） |
+| `close`, `settle` | ✔ | 收盘价、结算价 |
+| `open`, `high`, `low` | ✔（可为 null） | 无成交日（`vol=0`）可为 null；Skill 视该日为不可成交，两腿顺延 |
 | `vol`, `oi` | ✔ | 成交量、持仓量（手）；**`oi` 用于按时点安全的主力/次主力映射** |
 | `pre_settle` | 可选 | 昨结算；Skill 暂不使用 |
 | `pre_close`, `change1`, `change2`, `amount`, `oi_chg` | 可选 | Skill 不使用 |
@@ -52,8 +53,7 @@
 ## 兼容性检查
 
 ```bash
-export ZEUS_MCP_URL=http://<host>:8000/mcp ZEUS_MCP_TOKEN=<token>
-python scripts/run_statarb.py --check-zeus RB2501.SHF --start 20240102 --end 20240131
+uv run scripts/run_statarb.py --check-zeus RB2501.SHF --start 20240102 --end 20240131
 ```
 
 输出 JSON：`required.fut_daily` 必须为 `ok`（否则退出码 1）；`optional.*` 为 `ok`、`absent（替代：…）`、`missing fields [...]` 或 `no rows …`。这是真实 MCP 的集成检查，普通测试（`pytest`）只用本地假服务，不依赖 zeus 在线。

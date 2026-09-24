@@ -94,6 +94,7 @@ def test_changed_snapshot_changes_integrity_and_run_id(case):
     (lambda d: d["calls"][0].pop("retrieved_at"), "calls[0]: missing 'retrieved_at'"),
     (lambda d: d.pop("calls"), "snapshot: missing 'calls'"),
     (lambda d: d["calls"][0]["rows"][2].update(close=True), "calls[0].rows[2]: 'close' is not numeric"),
+    (lambda d: d["calls"][0]["rows"][2].update(settle=None), "calls[0].rows[2]: 'settle' is not numeric"),
     (lambda d: d["calls"][0]["rows"][2].update(close=float("nan")), "calls[0].rows[2]: 'close' is not numeric"),
     (lambda d: d["calls"][0]["rows"].append(dict(d["calls"][0]["rows"][4])),
      "calls[0].rows[320]: duplicate HC2405.SHF 20230109"),
@@ -166,3 +167,13 @@ def test_futures_cost_formula_per_leg():
     assert np.isclose(bt["cost"]["oos_by_leg"]["B"], exp_b)
     assert np.isclose(bt["cost"]["oos_total"], exp_a + exp_b)
     assert np.isclose(bt["margin_per_unit"], 0.12 + abs(bt["beta"]) * 0.08)
+
+
+def test_no_trade_rows_with_null_ohlc_are_accepted(case):
+    """真实 zeus：无成交日 open/high/low 为 null、vol=0，close/settle 仍有值。"""
+    def blank(d):
+        for r in d["calls"][0]["rows"][100:105]:
+            r.update(open=None, high=None, low=None, vol=0.0)
+    edit_json(case / "mcp_snapshot_hc_rb.json", blank)
+    man = run(case)
+    assert man["data_window"]["n_research_days"] == 319

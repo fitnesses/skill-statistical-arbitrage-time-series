@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "statsmodels>=0.14"]
+# ///
 """
 run_statarb.py — Statistical Arbitrage & Time Series Skill 的可执行骨架（优化版）。
 
@@ -1022,8 +1026,9 @@ class ZeusClient:
     """最小 MCP 客户端（仅标准库）：initialize → notifications/initialized → tools/list / tools/call。
     ponytail: 只实现 zeus 需要的请求-应答；无流式通知/重连，需要时换官方 mcp SDK。"""
 
-    def __init__(self, url, token=None, timeout=120):
+    def __init__(self, url, token=None, timeout=120, headers=None):
         self.url, self.token, self.timeout = url, token, timeout
+        self.extra_headers = dict(headers or {})
         self.session = None
         self._id = 0
         init = self._rpc("initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
@@ -1041,6 +1046,7 @@ class ZeusClient:
             msg["id"] = self._id
         headers = {"Content-Type": "application/json",
                    "Accept": "application/json, text/event-stream"}
+        headers.update(self.extra_headers)
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if self.session:
@@ -1093,6 +1099,66 @@ class ZeusClient:
         return rows
 
 
+SKILL_DIR = Path(__file__).resolve().parents[1]
+
+
+def _read_dotenv(path):
+    """最小 .env 解析：KEY=VALUE，支持 # 注释、export 前缀、单/双引号。"""
+    out = {}
+    for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.removeprefix("export ").split("=", 1)
+        v = v.strip()
+        if v[:1] in "\"'" and v[:1] and v.count(v[0]) >= 2:
+            v = v[1:v.index(v[0], 1)]
+        else:
+            v = v.split(" #")[0].strip()
+        out[k.strip()] = v
+    return out
+
+
+def _mcp_zeus(conf, cwd):
+    """从 Claude Code 风格的配置中取名为 zeus 的 MCP server（顶层或当前项目下）。"""
+    servers = [conf.get("mcpServers", {}).get("zeus")]
+    for proj, pc in (conf.get("projects") or {}).items():
+        if Path(proj).resolve() == Path(cwd).resolve():
+            servers.insert(0, (pc.get("mcpServers") or {}).get("zeus"))
+    return next((z for z in servers if z and z.get("url")), None)
+
+
+def resolve_zeus(cwd=None, skill_dir=None, home=None, environ=None):
+    """zeus 连接信息，按顺序取第一个可用来源 → (url, headers, 来源说明)；来源说明不含 token。
+      1. 进程环境变量 ZEUS_MCP_URL / ZEUS_MCP_TOKEN
+      2. 工作目录 .env   3. skill 目录 .env
+      4. Claude Code MCP 配置里名为 zeus 的 server：工作目录 .mcp.json → ~/.claude.json（项目级优先）"""
+    cwd, skill_dir = Path(cwd or Path.cwd()), Path(skill_dir or SKILL_DIR)
+    home, environ = Path(home or Path.home()), os.environ if environ is None else environ
+
+    def pack(url, token):
+        return url, ({"Authorization": f"Bearer {token}"} if token else {})
+
+    if environ.get("ZEUS_MCP_URL"):
+        return (*pack(environ["ZEUS_MCP_URL"], environ.get("ZEUS_MCP_TOKEN")), "环境变量")
+    for f in (cwd / ".env", skill_dir / ".env"):
+        if f.is_file():
+            env = _read_dotenv(f)
+            if env.get("ZEUS_MCP_URL"):
+                return (*pack(env["ZEUS_MCP_URL"], env.get("ZEUS_MCP_TOKEN")), str(f))
+    for f in (cwd / ".mcp.json", home / ".claude.json"):
+        if f.is_file():
+            try:
+                z = _mcp_zeus(json.loads(f.read_text(encoding="utf-8")), cwd)
+            except (OSError, json.JSONDecodeError, AttributeError):
+                continue
+            if z:
+                headers = {k: os.path.expandvars(str(v)) for k, v in (z.get("headers") or {}).items()}
+                return z["url"], headers, f"{f}（mcpServers.zeus）"
+    raise ZeusError(f"找不到 zeus 连接信息：请把 {SKILL_DIR / '.env.example'} 复制为工作目录下的 .env "
+                    "并填写 ZEUS_MCP_URL / ZEUS_MCP_TOKEN，或在 Claude Code 中添加名为 zeus 的 MCP server")
+
+
 def _probe_codes(product, exch, start, end):
     """无 fut_basic 时：枚举 品种+YYMM（区间起始月 → 结束月后 13 个月）作为候选合约代码。"""
     y, m = int(start[:4]), int(start[4:6])
@@ -1106,7 +1172,7 @@ def _probe_codes(product, exch, start, end):
     return out
 
 
-def fetch_snapshot(config_path, url, token=None):
+def fetch_snapshot(config_path, url, token=None, headers=None):
     """按研究配置调 zeus：fut_basic（或枚举）→ 每张合约 fut_daily，
     响应原样写入快照（不可变：已存在则拒绝；任何失败都不写文件）。缺失的可选工具记为能力缺口。"""
     cfg = load_config(config_path)
@@ -1117,7 +1183,7 @@ def fetch_snapshot(config_path, url, token=None):
     if snap_path.exists():
         raise ReplayInputError(f"snapshot {snap_path} already exists; 快照不可变，请换文件名")
 
-    client = ZeusClient(url, token)
+    client = ZeusClient(url, token, headers=headers)
     tools = client.list_tools()
     if "fut_daily" not in tools:
         raise ZeusError(f"zeus 缺少必需工具 fut_daily（现有：{tools}）")
@@ -1172,9 +1238,9 @@ def fetch_snapshot(config_path, url, token=None):
     return snap
 
 
-def check_zeus(url, token, sample_code, start, end):
+def check_zeus(url, token, sample_code, start, end, headers=None):
     """真实 MCP 兼容性检查（不进普通测试）：必需 fut_daily 字段齐全；可选工具存在且字段符合接口定义。"""
-    client = ZeusClient(url, token)
+    client = ZeusClient(url, token, headers=headers)
     tools = client.list_tools()
     prod, _, exch = fx.parse_code(sample_code)
 
@@ -1204,7 +1270,9 @@ def load_snapshot(snap):
     out = {"fut_daily": [], "fut_basic": []}
     # 快照只强制主键与会被使用的数值字段；fut_basic 其余字段缺失时按行回落到配置
     required = {"fut_daily": DAILY_FIELDS, "fut_basic": ("ts_code",)}
-    numeric = {"fut_daily": DAILY_FIELDS[2:]}
+    # 无成交日（vol=0）交易所只给 close/settle，open/high/low 为 null：允许为空，但不能是非数值
+    numeric = {"fut_daily": ("close", "settle", "vol", "oi")}
+    nullable = {"fut_daily": ("open", "high", "low")}
     seen = set()
     for i, call in enumerate(snap["calls"]):
         _require(call, ("tool", "params", "retrieved_at", "rows"), f"calls[{i}]")
@@ -1221,6 +1289,9 @@ def load_snapshot(snap):
             for f in numeric.get(tool, ()):
                 if not _is_num(row[f]):
                     raise ReplayInputError(f"{where}: '{f}' is not numeric: {row[f]!r}")
+            for f in nullable.get(tool, ()):
+                if row[f] is not None and not _is_num(row[f]):
+                    raise ReplayInputError(f"{where}: '{f}' is not numeric or null: {row[f]!r}")
             if tool == "fut_daily":
                 key = (row["ts_code"], row["trade_date"])
                 if key in seen:     # 分页重叠等导致的重复行：不静默覆盖
@@ -1394,20 +1465,21 @@ def main():
     ap.add_argument("--out", default="statarb_report.md")
     args = ap.parse_args()
 
-    url, token = os.environ.get("ZEUS_MCP_URL"), os.environ.get("ZEUS_MCP_TOKEN")
-    need_url = "[zeus] 请设置环境变量 ZEUS_MCP_URL（如 http://host:8000/mcp），鉴权 token 放 ZEUS_MCP_TOKEN"
+    def zeus():
+        url, headers, source = resolve_zeus()
+        print(f"[zeus] {url}（连接信息来自 {source}）")
+        return url, headers
+
     try:
         if args.check_zeus:
-            if not url:
-                raise SystemExit(need_url)
-            res = check_zeus(url, token, args.check_zeus, args.start, args.end)
+            url, headers = zeus()
+            res = check_zeus(url, None, args.check_zeus, args.start, args.end, headers=headers)
             print(json.dumps(res, ensure_ascii=False, indent=2))
             raise SystemExit(0 if res["ok"] else 1)
         if args.config:
             if args.fetch:
-                if not url:
-                    raise SystemExit(need_url)
-                snap = fetch_snapshot(args.config, url, token)
+                url, headers = zeus()
+                snap = fetch_snapshot(args.config, url, headers=headers)
                 n = sum(len(c["rows"]) for c in snap["calls"] if c["tool"] == "fut_daily")
                 print(f"[fetch] {snap['server']} {snap['server_version']}: {len(snap['calls'])} calls, "
                       f"{n} fut_daily rows; missing: {[m['tool'] for m in snap['missing_capabilities']] or 'none'}")

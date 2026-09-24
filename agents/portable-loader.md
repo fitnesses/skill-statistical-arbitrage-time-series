@@ -10,6 +10,6 @@ This skill uses `SKILL.md` as its canonical instruction set. A runtime adapter s
 - **Hermes:** load this file, then `SKILL.md`.
 - **OpenClaw:** load [`openai.yaml`](openai.yaml), then `SKILL.md`.
 
-Install dependencies once with `pip install -r requirements.txt` (Python ≥ 3.10; `statsmodels` is mandatory so every p-value is real). Data access goes only through the zeus MCP (`ZEUS_MCP_URL`, `ZEUS_MCP_TOKEN`); see `references/zeus-mcp-interface.md`.
+Run the script with `uv run scripts/run_statarb.py …`: dependencies are declared inline (PEP 723) and installed automatically into an isolated environment (`statsmodels` is mandatory so every p-value is real); `requirements.txt` is the pip fallback. Data access goes only through the zeus MCP; connection details come from env vars, a `.env` file (see `.env.example`), or the `zeus` MCP server configured in Claude Code — see `references/zeus-mcp-interface.md`.
 
 The bundled scripts are research tooling; it must not be treated as financial advice or as a guarantee of research validity.

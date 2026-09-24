@@ -216,11 +216,13 @@ class ContractSpecs:
 
 # ---------------- 可执行回测 ----------------
 def _blocked(tabs, code, day, field):
-    """当日该合约无可用成交价 → "no_bar"；否则 None。
+    """当日该合约无可用成交价 → "no_bar"；当日无成交（vol=0，交易所只给结算价）→ "no_trade"；否则 None。
     ponytail: 涨跌停暂不建模（一字板照常成交），需要时按 pre_settle×涨跌停幅度判定封板。"""
     tab = tabs[field]
     if code not in tab.columns or day not in tab.index or np.isnan(tab.at[day, code]):
         return "no_bar"
+    if not tabs["vol"].at[day, code] > 0:
+        return "no_trade(vol=0)"
     return None
 
 

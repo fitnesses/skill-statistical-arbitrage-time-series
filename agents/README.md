@@ -108,8 +108,8 @@ flowchart TD
 ### 1️⃣ 安装
 
 ```bash
-# 安装运行依赖（Python ≥ 3.10；statsmodels 为必需，缺失时脚本拒绝运行，保证 p 值真实）
-pip install -r requirements.txt
+# 无需手动安装 Python 依赖：脚本内联声明依赖（PEP 723），首次 `uv run` 自动建隔离环境（含必需的 statsmodels）
+# 没有 uv 时 agent 会征得同意后安装；zeus 连接信息自动复用 Claude Code 的 zeus MCP 配置，或填写工作目录 .env
 
 # Claude Code（全局）
 cp -r skill-statistical-arbitrage-time-series   ~/.claude/skills/statistical-arbitrage-time-series
@@ -125,18 +125,17 @@ cp -r skill-statistical-arbitrage-time-series   .cursor/skills/statistical-arbit
 
 > 也可不经 Agent 直接跑脚本（配置格式见 SKILL.md；zeus 接口见 references/zeus-mcp-interface.md）：
 > ```bash
-> export ZEUS_MCP_URL=http://<host>:8000/mcp ZEUS_MCP_TOKEN=<token>
-> python scripts/run_statarb.py --check-zeus RB2501.SHF                            # 检查 zeus 工具与字段
-> python scripts/run_statarb.py --config run1/config.json --fetch --out-dir run1   # zeus 取数 + 回放
-> python scripts/run_statarb.py --config run1/config.json --out-dir run1b          # 离线复跑同一快照
-> python -m pytest tests -q                                                        # 确定性测试（本地假 zeus）
+> uv run scripts/run_statarb.py --check-zeus RB2501.SHF                            # 检查 zeus 工具与字段
+> uv run scripts/run_statarb.py --config run1/config.json --fetch --out-dir run1   # zeus 取数 + 回放
+> uv run scripts/run_statarb.py --config run1/config.json --out-dir run1b          # 离线复跑同一快照
+> uv run --with pytest --with-requirements requirements.txt pytest tests -q        # 确定性测试（本地假 zeus）
 > # 五种分支自测（合成数据，覆盖每条裁决路径）：
-> python scripts/run_statarb.py --source synthetic --mode strong      # 🟢 绿灯：可进一步研究
-> python scripts/run_statarb.py --source synthetic --mode coint       # 🟡 协整但证据不足（慢回归）
-> python scripts/run_statarb.py --source synthetic --mode nocoint     # 🔴 不协整
-> python scripts/run_statarb.py --source synthetic --mode inversion   # 🔴 样本外有效但样本内无效
-> python scripts/run_statarb.py --source synthetic --mode leaked      # 🟡 价差非市场中性（漏 beta）
-> python scripts/run_statarb.py --source synthetic --mode drift       # 🔴 对冲比率结构漂移（Chow式断点）
+> uv run scripts/run_statarb.py --source synthetic --mode strong      # 🟢 绿灯：可进一步研究
+> uv run scripts/run_statarb.py --source synthetic --mode coint       # 🟡 协整但证据不足（慢回归）
+> uv run scripts/run_statarb.py --source synthetic --mode nocoint     # 🔴 不协整
+> uv run scripts/run_statarb.py --source synthetic --mode inversion   # 🔴 样本外有效但样本内无效
+> uv run scripts/run_statarb.py --source synthetic --mode leaked      # 🟡 价差非市场中性（漏 beta）
+> uv run scripts/run_statarb.py --source synthetic --mode drift       # 🔴 对冲比率结构漂移（Chow式断点）
 > # 自测成本：--fee-bps 1 --slippage-ticks 1（真实研究的合约参数来自 zeus，缺失时用 config 的 assumptions）
 > ```
 
@@ -168,7 +167,8 @@ cp -r skill-statistical-arbitrage-time-series   .cursor/skills/statistical-arbit
 ```
 Statistical Arbitrage & Time Series Modeling/
 ├── SKILL.md                       # 技能入口：工作流、分析规则、质量门槛
-├── requirements.txt               # numpy/pandas/scipy/statsmodels（必需）
+├── requirements.txt               # 依赖清单（与脚本内联声明一致；uv 不可用时的 pip 兜底）
+├── .env.example                   # zeus 连接信息模板（复制为 .env；已 gitignore）
 ├── references/
 │   ├── statarb-guide.md           # 📒 阶段方法地图、衍生指标公式、稳健性规则、实现/补充边界、报告蓝图、QA清单
 │   └── zeus-mcp-interface.md      # 🔌 zeus MCP 工具约定（fut_daily、fut_basic）
