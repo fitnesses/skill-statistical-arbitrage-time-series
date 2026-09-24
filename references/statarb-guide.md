@@ -110,7 +110,7 @@ Use this chapter order unless the user asks for a custom structure:
 11. `敏感性分析`: the same snapshot re-run with one parameter changed per row (fees ×2, slippage +1 tick, train 60%/80%, 20 lots, one more pre-delivery month); a conclusion that flips is not robust.
 12. `自动对账`: independent recomputation from the output CSVs (net = gross − costs, per-trade fees and slippage, gross PnL from fills + marks, roll decision days, training β and EG p) — every row must pass.
 
-Above chapter 1 the report shows a key-number table, the reconciliation/sensitivity status and an overview figure; each figure carries a "看图要点" line saying what normal looks like. `report.html` is the same report, self-contained.
+Above chapter 1 the report shows a key-number table, the reconciliation/sensitivity status, a **checklist (each test's result next to its pass standard and a ✓/△/✗ verdict, so readers never need to remember thresholds)** and an overview figure (four charts stacked vertically); each figure carries a "看图要点" line saying what normal looks like. `report.html` is the same report, self-contained.
 
 The header states two separate verdicts — **statistical evidence** and **trading feasibility** — because a stationary spread is not automatically a tradable strategy.
 

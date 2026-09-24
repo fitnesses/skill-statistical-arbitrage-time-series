@@ -193,3 +193,32 @@ def test_calendar_spread_renders_all_figures(tmp_path):
     srv.shutdown()
     man = rs.replay(cfg, tmp_path / "out")
     assert len([f for f in man["figures"] if f.endswith(".png")]) == len(FIGS)
+
+
+def test_first_page_checklist_shows_result_standard_and_verdict(run):
+    _, out, _ = run
+    text = (out / "report.md").read_text(encoding="utf-8")
+    head = text[:text.index("## 1.")]
+    assert "检验清单" in head and "| 检验项 | 本次结果 | 判定标准 | 是否达标 |" in head
+    checklist = head[head.index("检验清单"):]
+    for item, std in (("ADF", "p ≤ 0.05"), ("KPSS", "p > 0.05"), ("Engle-Granger", "p ≤ 0.05"),
+                      ("半衰期", "≤ 20 天"), ("对冲比率稳定性", "|z| < 2.5"), ("完成往返", "≥ 30"),
+                      ("可执行回测样本外净 PnL", "> 0"), ("压力情景", "> 0"), ("敏感性", "不翻转"), ("自动对账", "全部通过")):
+        row = next((l for l in checklist.splitlines() if l.startswith("| ") and item in l), None)
+        assert row and std.replace("|", "\|") in row, (item, row)
+        assert any(v in row for v in ("✓", "△", "✗", "ℹ")), row
+    assert head.index("检验清单") < head.index("figures/overview.png")
+
+
+def test_chapter4_table_has_a_standard_column(run):
+    _, out, _ = run
+    text = (out / "report.md").read_text(encoding="utf-8")
+    ch4 = text[text.index("## 4."):text.index("## 5.")]
+    assert "| 检验 | 窗口 | 统计量 | p | 判定标准 | 结论 |" in ch4
+
+
+def test_overview_stacks_four_charts_vertically(run):
+    import matplotlib.image as mpimg
+    _, out, _ = run
+    h, w = mpimg.imread(out / "figures" / "overview.png").shape[:2]
+    assert h > w                                   # 4 张图竖排

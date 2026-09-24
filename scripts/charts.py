@@ -97,7 +97,7 @@ def draw_zscore(ax, p, labels=True):
         ax.legend(ncol=4, loc="lower left", bbox_to_anchor=(0, -0.32))
     else:
         ax.legend(handles=[h for h, l in zip(*ax.get_legend_handles_labels()) if "signal" in l or l == "z-score"],
-                  ncol=2, loc="lower left", fontsize=7)
+                  ncol=4, loc="lower left", fontsize=7, frameon=True, facecolor=SURFACE, edgecolor=GRID, framealpha=0.9)
 
 
 def draw_equity(ax, p, labels=True, stress=True):
@@ -279,11 +279,12 @@ def render(out_dir, p):
     draw_rolling(axes, p)
     save("rolling_stability", fig)
 
-    fig = plt.figure(figsize=(12, 8))
-    g = fig.add_gridspec(2, 2, height_ratios=[1, 1], hspace=0.55, wspace=0.22)
-    ax = fig.add_subplot(g[0, 0]); draw_zscore(ax, p, labels=False); ax.set_title("Spread z-score & fills")
-    ax = fig.add_subplot(g[0, 1]); draw_equity(ax, p, labels=False, stress=False); ax.set_title("Cumulative PnL (CNY)")
-    ax = fig.add_subplot(g[1, 0]); draw_timeline(ax, p); ax.set_title("Contracts held (rolls)")
-    draw_waterfall(fig.add_subplot(g[1, 1]), p["metrics"].get("oos"), "Out-of-sample: gross → net")
+    fig = plt.figure(figsize=(11, 15))                  # 4 行 1 列：一行一张，横向空间留给时间轴
+    g = fig.add_gridspec(4, 1, height_ratios=[1.1, 1.1, 0.75, 0.95], hspace=0.6)
+    ax = fig.add_subplot(g[0]); draw_zscore(ax, p, labels=False); ax.set_title("1. Spread z-score & trade signals")
+    ax = fig.add_subplot(g[1]); draw_equity(ax, p, labels=False, stress=False)
+    ax.set_title("2. Executable backtest: cumulative PnL (CNY)")
+    ax = fig.add_subplot(g[2]); draw_timeline(ax, p); ax.set_title("3. Contracts held by each leg (rolls)")
+    draw_waterfall(fig.add_subplot(g[3]), p["metrics"].get("oos"), "4. Out-of-sample: gross → costs → net")
     save("overview", fig)
     return out

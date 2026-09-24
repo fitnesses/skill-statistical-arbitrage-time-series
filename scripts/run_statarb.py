@@ -494,6 +494,61 @@ def _cell(x):
     return str(x).replace("|", "\\|")
 
 
+# 判定标准（与 robustness_flags / futures_flags 的阈值一致；首页检验清单与第 4 章直接引用）
+STD_ADF = "p ≤ 0.05 平稳（拒绝单位根）；0.05–0.10 边际；> 0.10 不平稳"
+STD_KPSS = "p > 0.05 平稳（不拒绝平稳）；≤ 0.05 不平稳；应与 ADF 结论一致"
+STD_EG = "p ≤ 0.05 协整；0.05–0.10 边际；> 0.10 不协整"
+STD_HL = "≤ 20 天回归较快；20–60 天偏慢；> 60 天或 ∞ 不可交易"
+
+
+def _mark(ok, warn=False):
+    return "✓ 达标" if ok else ("△ 边际" if warn else "✗ 不达标")
+
+
+def _p_mark(p, lo=0.05, hi=0.10):
+    return _mark(p <= lo, p <= hi)
+
+
+def checklist_rows(s, n_candidates=1):
+    """统计证据部分的检验清单：(检验项, 本次结果, 判定标准, 是否达标)。"""
+    bt, bs = s["bt"], s["betastab"]
+    hl = s["hl_tr"]
+    eg_lim = 0.05 / max(n_candidates, 1)
+    cz, rel = abs(bs["chow_z"]), bs["chow_rel"]
+    is_s, oos_s, oos_t = bt["is_net"]["sharpe"], bt["oos_net"]["sharpe"], bt["oos_net"]["t"]
+    rows = [
+        ("平稳性：ADF（训练窗价差）", f"p={_fmt_p(s['adf_tr'][1], 0.001, 0.99)}", STD_ADF, _p_mark(s["adf_tr"][1])),
+        ("平稳性：KPSS（训练窗价差）", f"p={_fmt_p(s['kpss_tr'][1])}", STD_KPSS, _mark(s["kpss_tr"][1] > 0.05)),
+        ("协整：Engle-Granger（训练窗对数价）", f"p={_fmt_p(s['eg'][1], 0.001, 0.99)}",
+         STD_EG if n_candidates <= 1 else f"p ≤ {eg_lim:.4g} 协整（Bonferroni：0.05 / {n_candidates} 个候选）",
+         _p_mark(s["eg"][1], eg_lim, 0.10)),
+        ("均值回归：半衰期（训练窗）", "∞" if not np.isfinite(hl) else f"{hl:.1f} 天", STD_HL,
+         _mark(np.isfinite(hl) and hl <= 20, np.isfinite(hl) and hl <= 60)),
+        ("对冲比率稳定性：前后半样本 β 断点", f"|z|={cz:.2f}，相对差 {rel:.2f}",
+         "|z| < 2.5 或相对差 ≤ 0.2 稳定；2.5 ≤ |z| < 4 需复核；|z| ≥ 4 且相对差 > 0.2 结构漂移",
+         _mark(cz < 2.5 or rel <= 0.2, cz < 4)),
+        ("z 回看窗 vs 半衰期", f"窗 {bt['window']} 天 / 半衰期 {'∞' if not np.isfinite(hl) else f'{hl:.1f}'} 天",
+         "回看窗 ≥ 半衰期（窗太短会制造伪信号）", _mark(not np.isfinite(hl) or bt["window"] >= hl)),
+        ("显著性：样本外 Sharpe（研究口径）", f"{oos_s:.2f}（t={oos_t:.2f}）",
+         "Sharpe > 0 且 |t| ≥ 1.96 才与 0 可区分", _mark(oos_s > 0 and abs(oos_t) >= 1.96)),
+        ("样本量：样本外完成往返", f"{bt['n_round_trips_oos']} 笔", "≥ 30 笔", _mark(bt["n_round_trips_oos"] >= 30)),
+        ("样本内外一致性", f"样本内 {is_s:.2f} / 样本外 {oos_s:.2f}",
+         "样本内 Sharpe > 0.05 且样本外 ≥ 样本内一半（否则过拟合或只在样本外有效）",
+         _mark(is_s > 0.05 and oos_s >= 0.5 * is_s)),
+    ]
+    if s.get("season"):
+        rows.append(("季节性：按月 Kruskal-Wallis（训练窗）", f"p={s['season'][1]:.3f}",
+                     "p ≥ 0.05 无显著季节性；< 0.05 需按季节拆分验证", "ℹ 无" if s["season"][1] >= 0.05 else "△ 有季节性"))
+    return rows
+
+
+def checklist_lines(rows):
+    return ["\n### 检验清单（本次结果 vs 判定标准）",
+            "| 检验项 | 本次结果 | 判定标准 | 是否达标 |", "|---|---|---|---|",
+            *["| " + " | ".join(_cell(x) for x in r) + " |" for r in rows],
+            "\n✓ 达标　△ 边际/需复核　✗ 不达标　ℹ 仅供参考；阈值说明见 references/statarb-guide.md。"]
+
+
 def _exe_ok(oos, flags):
     """交易可行性：整手真实合约样本外净盈亏 >0 且显著，且无高风险信号。"""
     return bool(bool(oos.get("days")) and oos["net"] > 0 and abs(oos["t"]) >= 1.96
@@ -508,8 +563,11 @@ def _stat_tradable(s):
                 and f["n_round_trips_oos"] >= 30 and alpha_ok)
 
 
-def write_report(a, b, source, px, s, flags, path, header=(), insert=None):
-    """s = run_stats() 的结果；header 插在标题后；insert = {章节标题前缀: 行列表} 插在该章节之前。"""
+def write_report(a, b, source, px, s, flags, path, header=None, insert=None):
+    """s = run_stats() 的结果；header 插在标题后（None → 默认放统计检验清单）；
+    insert = {章节标题前缀: 行列表} 插在该章节之前。"""
+    if header is None:
+        header = checklist_lines(checklist_rows(s))
     bt = f = s["bt"]
     adf_tr, kpss_tr, adf_full, adf_oos = s["adf_tr"], s["kpss_tr"], s["adf_full"], s["adf_oos"]
     hl_tr, hl_full, betastab, attr, attr_sp, eg = (s["hl_tr"], s["hl_full"], s["betastab"], s["attr"],
@@ -563,14 +621,14 @@ def write_report(a, b, source, px, s, flags, path, header=(), insert=None):
         "完成往返≥30 笔且残差 α 显著，故慢回归/样本少的对子通常会被判为否决。",
 
         "\n## 4. 协整与平稳性检验",
-        "| 检验 | 窗口 | 统计量 | p | 结论 |",
-        "|---|---|---|---|---|",
-        f"| ADF | 训练窗（标题判定） | {adf_tr[0]:.3f} | {_fmt_p(adf_tr[1], 0.001, 0.99)} | {adf_tr[2]} |",
-        f"| KPSS | 训练窗 | {kpss_tr[0]:.3f} | {_fmt_p(kpss_tr[1])} | {kpss_tr[2]} |",
-        f"| Engle-Granger 协整 | 训练窗（对数价） | {eg[0]:.3f} | {_fmt_p(eg[1], 0.001, 0.99)} | "
+        "| 检验 | 窗口 | 统计量 | p | 判定标准 | 结论 |",
+        "|---|---|---|---|---|---|",
+        f"| ADF | 训练窗（标题判定） | {adf_tr[0]:.3f} | {_fmt_p(adf_tr[1], 0.001, 0.99)} | {STD_ADF} | {adf_tr[2]} |",
+        f"| KPSS | 训练窗 | {kpss_tr[0]:.3f} | {_fmt_p(kpss_tr[1])} | {STD_KPSS} | {kpss_tr[2]} |",
+        f"| Engle-Granger 协整 | 训练窗（对数价） | {eg[0]:.3f} | {_fmt_p(eg[1], 0.001, 0.99)} | {STD_EG} | "
         f"{'拒绝“不协整”' if eg[1] <= 0.05 else '无法拒绝“不协整”'}（MacKinnon p 值） |",
-        f"| ADF | 全样本（对照） | {adf_full[0]:.3f} | {_fmt_p(adf_full[1], 0.001, 0.99)} | — |",
-        f"| ADF | 样本外（对照） | {adf_oos[0]:.3f} | {_fmt_p(adf_oos[1], 0.001, 0.99)} | — |",
+        f"| ADF | 全样本（对照） | {adf_full[0]:.3f} | {_fmt_p(adf_full[1], 0.001, 0.99)} | 同上，仅作对照 | — |",
+        f"| ADF | 样本外（对照） | {adf_oos[0]:.3f} | {_fmt_p(adf_oos[1], 0.001, 0.99)} | 同上，仅作对照 | — |",
         "\n说明：标题协整结论只用训练窗价差，避免 β 用训练窗、ADF 用全样本造成的前视泄漏；"
         "全样本/样本外仅作对照。ADF 与 KPSS 零假设相反，两者都指向平稳才是干净证据。"
         "KPSS 的 p 被截断在 [0.01,0.10]，故显示为 >0.10 / <0.01。",
@@ -880,8 +938,25 @@ def futures_report_parts(a, b, s, ctx, flags):
         + f"{_cell(flags[0][0] + ' ' + flags[0][1])} |",
         f"\n> 自动对账：{'全部通过' if checks and not n_bad else f'{n_bad} 项未通过（见第 12 章）'}；"
         f"敏感性：{f'{same}/{len(sens_ok)} 组参数下两项结论与样本外盈亏方向均与基准一致（见第 11 章）' if sens_ok else '未运行'}。",
-        *([f"\n![总览]({F['overview']})"] if "overview" in F else []),
     ]
+    st_oos = ctx["stress"].get("oos") or {}
+    exe_rows = []
+    if oos.get("days"):
+        exe_rows += [
+            ("交易可行性：可执行回测样本外净 PnL", f"{oos['net']:,.0f} 元", "整手真实合约、扣费后 > 0", _mark(oos["net"] > 0)),
+            ("交易可行性：可执行回测样本外显著性", f"Sharpe {oos['sharpe']:.2f}（t={oos['t']:.2f}）",
+             "|t| ≥ 1.96", _mark(abs(oos["t"]) >= 1.96 and oos["net"] > 0, oos["net"] > 0))]
+    if st_oos.get("days"):
+        exe_rows.append(("交易可行性：压力情景样本外净 PnL", f"{st_oos['net']:,.0f} 元",
+                         "手续费×2、滑点+1 跳后仍 > 0", _mark(st_oos["net"] > 0)))
+    if sens_ok:
+        exe_rows.append(("稳健性：敏感性分析", f"{len(sens_ok) - same}/{len(sens_ok)} 组翻转",
+                         "所有参数组的两项结论与样本外盈亏方向均不翻转", _mark(same == len(sens_ok))))
+    if checks:
+        exe_rows.append(("数据与计算：自动对账", f"{len(checks) - n_bad}/{len(checks)} 项通过", "全部通过",
+                         _mark(n_bad == 0)))
+    header += checklist_lines(checklist_rows(s, n) + exe_rows)
+    header += [f"\n![总览]({F['overview']})"] if "overview" in F else []
     sec2 += fig("roll_timeline", "换月时间线",
                 "每条横带是一张合约（标签为 YYMM），两段之间即换月；应呈规律的节奏，不应来回切换；"
                 "跨期时远月腿的合约应始终晚于近月腿。| 为持仓量交叉换月，▼ 为强制换出（临近交割或近月腿换入）。")
