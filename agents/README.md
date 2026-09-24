@@ -128,6 +128,7 @@ cp -r skill-statistical-arbitrage-time-series   .cursor/skills/statistical-arbit
 > uv run scripts/run_statarb.py --check-zeus RB2501.SHF                            # 检查 zeus 工具与字段
 > uv run scripts/run_statarb.py --config run1/config.json --fetch --out-dir run1   # zeus 取数 + 回放
 > uv run scripts/run_statarb.py --config run1/config.json --out-dir run1b          # 离线复跑同一快照
+> uv run scripts/run_statarb.py --config run1/config.json --verify run1           # 对已有结果重新对账
 > uv run --with pytest --with-requirements requirements.txt pytest tests -q        # 确定性测试（本地假 zeus）
 > # 五种分支自测（合成数据，覆盖每条裁决路径）：
 > uv run scripts/run_statarb.py --source synthetic --mode strong      # 🟢 绿灯：可进一步研究
@@ -147,15 +148,15 @@ cp -r skill-statistical-arbitrage-time-series   .cursor/skills/statistical-arbit
 螺纹钢和热卷（RB2501.SHF / HC2501.SHF）能做跨品种套利吗？提醒我数据窥探风险
 ```
 
-### 3️⃣ 报告结构（10 章 + 可审计产物）
+### 3️⃣ 报告结构（12 章 + 图表 + 可审计产物）
 
 ```
-摘要与结论 → 数据、合约映射与换月 → 候选与经济逻辑 → 协整与平稳性检验 → 价差建模与均值回归
+首页（结论 + 关键数字 + 总览图）→ 摘要与结论 → 数据、合约映射与换月 → 候选与经济逻辑 → 协整与平稳性检验 → 价差建模与均值回归
 → 交易可行性（真实合约·整手） → 回测与偏差控制（研究口径） → 稳健性与风险信号清单 → 方法附录
-→ 未做的分析、数据限制与假设
+→ 未做的分析、数据限制与假设 → 敏感性分析 → 自动对账
 ```
 
-产物：`report.md`、`manifest.json`（run_id、哈希、MCP 调用、能力缺口、参数来源、拟合参数、指标）、`mapping.csv`、`rolls.csv`、`trades.csv`、`daily.csv`、`events.csv`。
+产物：`report.md` 与自包含 `report.html`（首页：两项结论 + 关键数字 + 对账/敏感性状态 + 总览图；正文每张图附“看图要点”）、`figures/*.png`（总览、z-score 与成交、净值与回撤、换月时间线、研究序列 vs 真实价格、成本瀑布、滚动稳定性）、`manifest.json`（run_id、哈希、MCP 调用、能力缺口、参数来源、拟合参数、指标、对账、敏感性）、`mapping.csv`、`rolls.csv`、`trades.csv`、`daily.csv`、`events.csv`。报告第 11 章为敏感性分析，第 12 章为自动对账。
 
 风险信号清单为表格：`风险等级 | 信号 | 触发规则 | 证据 | 窗口/样本 | 所用检验或公式`。
 方法附录为表格：`分析阶段 | 数据来源/方法 | 查询或样本窗口 | 可用样本量 | 关键统计量/参数 | 备注`（含"未做项"清单）。
@@ -174,7 +175,8 @@ Statistical Arbitrage & Time Series Modeling/
 │   └── zeus-mcp-interface.md      # 🔌 zeus MCP 工具约定（fut_daily、fut_basic）
 ├── scripts/
 │   ├── run_statarb.py             # 🐍 编排：配置校验→zeus 取数/快照→回放→统计证据→规则→报告与产物
-│   └── futures.py                 # 🧾 期货规则：合约映射/换月、研究序列、合约参数、整手可执行回测
+│   ├── futures.py                 # 🧾 期货规则：合约映射/换月、研究序列、合约参数、整手可执行回测
+│   └── charts.py                  # 📊 报告图表（PNG）与自包含 HTML（只读回放产出，不参与计算）
 ├── tests/                         # 🧪 确定性测试（本地假 zeus + 合约级数据生成器）
 └── agents/
     └── README.md                  # 📖 本说明文件

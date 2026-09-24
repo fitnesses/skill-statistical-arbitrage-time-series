@@ -107,6 +107,10 @@ Use this chapter order unless the user asks for a custom structure:
 8. `稳健性与风险信号清单`: table with level, signal, triggering rule, evidence, window/sample, and the test or formula used.
 9. `方法附录`: stage-by-stage source table with data window, usable rows, test names, key statistics, and caveats — including an explicit list of advanced steps **not** performed.
 10. `未做的分析、数据限制与假设`: analyses not run, every zeus capability gap with its fallback, config assumptions, and execution parameters.
+11. `敏感性分析`: the same snapshot re-run with one parameter changed per row (fees ×2, slippage +1 tick, train 60%/80%, 20 lots, one more pre-delivery month); a conclusion that flips is not robust.
+12. `自动对账`: independent recomputation from the output CSVs (net = gross − costs, per-trade fees and slippage, gross PnL from fills + marks, roll decision days, training β and EG p) — every row must pass.
+
+Above chapter 1 the report shows a key-number table, the reconciliation/sensitivity status and an overview figure; each figure carries a "看图要点" line saying what normal looks like. `report.html` is the same report, self-contained.
 
 The header states two separate verdicts — **statistical evidence** and **trading feasibility** — because a stationary spread is not automatically a tradable strategy.
 

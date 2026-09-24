@@ -50,8 +50,8 @@ def test_replay_writes_report_and_auditable_manifest(case):
 
     assert man["config"]["legs"] == ["HC2405.SHF", "RB2405.SHF"]
     assert man["config_sha256"] == sha256(case / "replay_config.json")
-    code_sha = hashlib.sha256((sha256(ROOT / "scripts" / "run_statarb.py")
-                               + sha256(ROOT / "scripts" / "futures.py")).encode()).hexdigest()
+    code_sha = hashlib.sha256("".join(sha256(ROOT / "scripts" / f) for f in
+                                      ("run_statarb.py", "futures.py", "charts.py")).encode()).hexdigest()
     assert man["code"]["sha256"] == code_sha
     assert man["run_id"] and man["created_at"]
     assert snap["path"] == "mcp_snapshot_hc_rb.json" and snap["snapshot_version"] == 1

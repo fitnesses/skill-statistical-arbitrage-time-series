@@ -23,5 +23,9 @@
   },
   "execution": {
     "slippage_ticks": 1
+  },
+  "report": {
+    "charts": false,
+    "sensitivity": false
   }
 }

@@ -41,7 +41,8 @@ def daily_only_zeus(market):
 
 
 def write_cfg(tmp, extra, **kw):
-    cfg = {"snapshot": "snapshot.json", "start_date": START, "end_date": END, "assumptions": COSTS, **extra, **kw}
+    cfg = {"snapshot": "snapshot.json", "start_date": START, "end_date": END, "assumptions": COSTS,
+           "report": {"charts": False, "sensitivity": False}, **extra, **kw}
     p = tmp / "config.json"
     p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     return p

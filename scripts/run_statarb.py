@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "statsmodels>=0.14"]
+# dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "statsmodels>=0.14", "matplotlib>=3.7", "markdown>=3.4"]
 # ///
 """
 run_statarb.py — Statistical Arbitrage & Time Series Skill 的可执行骨架（优化版）。
@@ -44,7 +44,7 @@ Johansen、Kalman 动态对冲、Chow/CUSUM、滚动前推(walk-forward)、价�
   python run_statarb.py --config run1/config.json --out-dir run1b          # 仅回放已有快照
   python run_statarb.py --source synthetic --mode strong                   # 离线自测
 """
-import argparse, datetime as dt, hashlib, json, os, subprocess, sys, warnings
+import argparse, datetime as dt, hashlib, json, os, re, subprocess, sys, warnings
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -489,12 +489,23 @@ def robustness_flags(adf_p, kpss_p, hl, bt, betastab, attr=None, attr_sp=None):
 
 
 # ============ 5. 报告输出（对应 9 章蓝图，精简版） ============
+def _cell(x):
+    """表格单元格：转义竖线（如 |t|<1.96），否则 Markdown/HTML 会把它当列分隔符。"""
+    return str(x).replace("|", "\\|")
+
+
+def _exe_ok(oos, flags):
+    """交易可行性：整手真实合约样本外净盈亏 >0 且显著，且无高风险信号。"""
+    return bool(bool(oos.get("days")) and oos["net"] > 0 and abs(oos["t"]) >= 1.96
+                and not any(f[0] == "🔴 高" for f in flags))
+
+
 def _stat_tradable(s):
     f, attr = s["bt"], s["attr"]
     alpha_ok = (attr is None) or (abs(attr["t_alpha"]) >= 1.96)
-    return (s["adf_tr"][1] <= 0.05 and np.isfinite(s["hl_tr"]) and s["hl_tr"] <= 60
-            and f["oos_net"]["sharpe"] > 0 and abs(f["oos_net"]["t"]) >= 1.96
-            and f["n_round_trips_oos"] >= 30 and alpha_ok)
+    return bool(s["adf_tr"][1] <= 0.05 and np.isfinite(s["hl_tr"]) and s["hl_tr"] <= 60
+                and f["oos_net"]["sharpe"] > 0 and abs(f["oos_net"]["t"]) >= 1.96
+                and f["n_round_trips_oos"] >= 30 and alpha_ok)
 
 
 def write_report(a, b, source, px, s, flags, path, header=(), insert=None):
@@ -604,7 +615,7 @@ def write_report(a, b, source, px, s, flags, path, header=(), insert=None):
         "|---|---|---|---|",
     ]
     for lv, sig, rule, ev in flags:
-        lines.append(f"| {lv} | {sig} | {rule} | {ev} |")
+        lines.append("| " + " | ".join(_cell(x) for x in (lv, sig, rule, ev)) + " |")
 
     lines += [
         "\n## 9. 方法附录",
@@ -618,7 +629,7 @@ def write_report(a, b, source, px, s, flags, path, header=(), insert=None):
         f"| 信号/回测 | 向量化 z-score + 近似成本（研究口径） | 样本内/外 | "
         f"窗={f['window']}(自适应), 开={2.0}, 平={0.5}, 止={3.5} | 完成往返 {f['n_round_trips_oos']} |",
         f"| 显著性 | Sharpe t 统计量 + 重叠折减 | 样本外 | "
-        f"t={f['oos_net']['t']:.2f}, t_eff={f['oos_net']['t_eff']:.2f} | |t|<2 视为不显著 |",
+        f"t={f['oos_net']['t']:.2f}, t_eff={f['oos_net']['t_eff']:.2f} | \\|t\\|<2 视为不显著 |",
         (f"| 因子归因 | 样本外净收益 OLS 回归市场代理 | 样本外 | "
          f"β_mkt={attr['beta']:.2f}(t={attr['t_beta']:.2f}), α年化={attr['alpha_annual']:.3f}"
          f"(t={attr['t_alpha']:.2f}), R²={attr['r2']:.2f} | 残差α不显著则优势存疑(β显著→漏beta；β也不显著→噪声) |"
@@ -635,8 +646,10 @@ def write_report(a, b, source, px, s, flags, path, header=(), insert=None):
     for key, extra in (insert or {}).items():
         i = next(i for i, l in enumerate(lines) if l.lstrip("\n").startswith(key))
         lines[i:i] = extra
+    text = "\n".join(lines)
+    text = re.sub(r"(?m)^([^|\n].*)\n(?=\|)", r"\1\n\n", text)     # 表格前补空行，Markdown 才会识别为表格
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines))
+        fh.write(text)
 
 
 # ============ 分析流水线（CLI 与回放共用） ============
@@ -768,8 +781,7 @@ def futures_report_parts(a, b, s, ctx, flags):
     ex, M, bt = cfg["execution"], exe["metrics"], s["bt"]
     oos = M.get("oos", {})
     stat_ok = _stat_tradable(s)
-    exe_ok = bool(oos.get("days")) and oos["net"] > 0 and abs(oos["t"]) >= 1.96 and \
-        not any(fl[0] == "🔴 高" for fl in flags)
+    exe_ok = _exe_ok(oos, flags)
     rolls, research = ctx["rolls"], ctx["research"]
     n = cfg["screening"]["n_candidates"]
     ev = exe["events"]
@@ -848,6 +860,66 @@ def futures_report_parts(a, b, s, ctx, flags):
         "- **执行局限**：日线只说明当日价格区间，不能证明按假设价成交；未建模盘口深度、平今手续费、"
         "交割与限仓规则、夜盘跳空对开盘成交价的影响。逐笔成交见 trades.csv，逐日盈亏与保证金见 daily.csv。",
     ]
+    F = ctx.get("figures", {})
+
+    def fig(name, alt, note):
+        return [f"\n![{alt}]({F[name]})", f"*看图要点：{note}*"] if name in F else []
+
+    checks, sens = ctx.get("checks", []), ctx.get("sensitivity", [])
+    n_bad = sum(not c["ok"] for c in checks)
+    sens_ok = [r for r in sens if "stat_ok" in r and r["variant"] != "基准"]
+    same = sum(r["same_as_base"] for r in sens_ok)
+    mdd = oos.get("max_drawdown")
+    header += [
+        "",
+        "| 统计证据 | 交易可行性 | 样本外净 PnL（元） | 样本外 Sharpe (t) | 样本外最大回撤 | 完成往返 | 最高风险 |",
+        "|---|---|---|---|---|---|---|",
+        f"| {'支持继续研究' if stat_ok else '不足'} | {'可行（待复核）' if exe_ok else '不足/未证实'} | "
+        + (f"{oos['net']:,.0f} | {oos['sharpe']:.2f} ({oos['t']:.2f}) | {mdd:,.0f} | {oos['round_trips']} | "
+           if oos.get("days") else "— | — | — | — | ")
+        + f"{_cell(flags[0][0] + ' ' + flags[0][1])} |",
+        f"\n> 自动对账：{'全部通过' if checks and not n_bad else f'{n_bad} 项未通过（见第 12 章）'}；"
+        f"敏感性：{f'{same}/{len(sens_ok)} 组参数下两项结论与样本外盈亏方向均与基准一致（见第 11 章）' if sens_ok else '未运行'}。",
+        *([f"\n![总览]({F['overview']})"] if "overview" in F else []),
+    ]
+    sec2 += fig("roll_timeline", "换月时间线",
+                "每条横带是一张合约（标签为 YYMM），两段之间即换月；应呈规律的节奏，不应来回切换；"
+                "跨期时远月腿的合约应始终晚于近月腿。| 为持仓量交叉换月，▼ 为强制换出（临近交割或近月腿换入）。")
+    sec2 += fig("research_vs_exec", "研究序列与真实价格",
+                "灰线是真实合约收盘价，换月处（竖线）有跳空；彩线是研究用连续序列，同一位置应平滑无跳空。两者日间涨跌应一致，"
+                "水平差随每次换月逐步累积（展期收益：期限结构升水/贴水），这是正常的，不代表数据有误。")
+    sec6 = fig("rolling_stability", "滚动稳定性",
+                "滚动 β 应围绕训练期 β 窄幅波动；半衰期显著拉长（顶部 ▲ 表示该窗口价差不回归、半衰期为无穷）"
+                "或 ADF p 长期高于 0.05 的区段，说明价差关系在该时期减弱或失效（区制变化的直观信号）。"
+                "灰底之外为训练期内的滚动诊断，灰底内为样本外，均只作诊断、不参与参数估计。") + sec6
+    sec6 += fig("zscore_signals", "z-score 与成交",
+                "标记画在信号日（当日收盘 z 越过 ±开仓线开仓、回到平仓线附近或越过止损线平仓），实际成交在次一交易日；"
+                "样本外区域（灰底）若 z 长时间偏离不回，说明价差漂移，均值回归假设失效。")
+    sec6 += fig("equity_drawdown", "净值与回撤",
+                "蓝线（毛）与橙线（净）之间的差距就是成本；样本外区域是否继续向上是关键；青线为压力情景"
+                "（手续费×2、滑点+1 跳）。回撤在样本内、样本外分段计算，与首页表格口径一致。")
+    sec6 += fig("cost_waterfall", "成本瀑布",
+                "从毛盈亏依次扣手续费、滑点、资金成本得到净盈亏；可一眼看出优势被哪项成本吃掉。")
+    sec11 = ["\n## 11. 敏感性分析", "同一快照下每次只改一项参数重跑，看两项结论与样本外盈亏方向是否翻转（都不翻转才算稳健）。"]
+    if sens:
+        sec11 += ["| 参数组 | 统计证据 | 交易可行性 | EG p | 样本外净 PnL | 样本外 t | 往返 | 最高风险 | 与基准一致 |",
+                  "|---|---|---|---|---|---|---|---|---|"]
+        for r in sens:
+            if "skipped" in r or "error" in r:
+                why = f"不适用：{r['skipped']}" if "skipped" in r else f"运行失败：{r['error']}"
+                sec11.append(f"| {r['variant']} | {_cell(why)} | — | — | — | — | — | — | 不计入 |")
+                continue
+            net = f"{r['oos_net']:,.0f}" if r["oos_net"] is not None else "—"
+            t = f"{r['oos_t']:.2f}" if r["oos_t"] is not None else "—"
+            sec11.append(f"| {r['variant']} | {'支持' if r['stat_ok'] else '不足'} | {'可行' if r['exe_ok'] else '不足'} | "
+                         f"{r['eg_p']:.4f} | {net} | {t} | {r['round_trips']} | {_cell(r['top_flag'])} | "
+                         f"{'✓' if r['same_as_base'] else '✗ 翻转'} |")
+    else:
+        sec11.append("未运行（config.report.sensitivity=false）。")
+    sec12 = ["\n## 12. 自动对账", "从输出的 CSV 独立复算，核对报告数字是否自洽：",
+             "| 核对项 | 结果 | 说明 |", "|---|---|---|",
+             *[f"| {c['check']} | {'✓ 通过' if c['ok'] else '✗ 未通过'} | {c['detail']} |" for c in checks],
+             f"\n结论：{'全部通过' if checks and not n_bad else f'{n_bad} 项未通过'}。"]
     sec10 = [
         "\n## 10. 未做的分析、数据限制与假设",
         "- 未做（需 Agent 另行补充，不得写成已完成）：Johansen 协整、Kalman 动态对冲、完整 Chow/CUSUM、"
@@ -857,7 +929,7 @@ def futures_report_parts(a, b, s, ctx, flags):
         f"- 执行参数：{json.dumps(ex, ensure_ascii=False)}。",
         "- 第 7 章为研究口径（价差对数收益 + 近似成本），只作统计证据；金额口径以第 6 章为准。",
     ]
-    return {"header": header, "insert": {"## 4.": sec2 + sec3, "## 7.": sec6, "---": sec10}}
+    return {"header": header, "insert": {"## 4.": sec2 + sec3, "## 7.": sec6, "---": sec10 + sec11 + sec12}}
 
 
 # ============ 研究配置 ============
@@ -1004,6 +1076,13 @@ def load_config(config_path):
         if "fee_rate" not in a and "fee_per_lot" not in a:
             raise ReplayInputError(f"config.assumptions.{prod}: 需指定 'fee_rate'（按成交额，如 0.0001）"
                                    f"或 'fee_per_lot'（元/手）")
+    rep_raw = cfg.get("report", {})
+    if not isinstance(rep_raw, dict) or set(rep_raw) - {"charts", "sensitivity"}:
+        raise ReplayInputError(f"config.report: 只支持 'charts' / 'sensitivity'（true/false），got {rep_raw!r}")
+    report = {"charts": True, "sensitivity": True, **rep_raw}
+    for k, v in report.items():
+        if not isinstance(v, bool):
+            raise ReplayInputError(f"config.report.{k} must be true/false, got {v!r}")
     window = _num(cfg.get("window", 0), "config.window", 0, integer=True)
     train_frac = _num(cfg.get("train_frac", 0.7), "config.train_frac", 0.3, 0.9)
     for k in ("start_date", "end_date"):
@@ -1013,7 +1092,7 @@ def load_config(config_path):
         raise ReplayInputError(f"config: 'start_date' {cfg['start_date']} 晚于 'end_date' {cfg['end_date']}")
     return {"path": config_path, "raw": cfg, "snapshot": cfg["snapshot"], "legs": legs, "family": family,
             "rationale": rationale, "screening": screening, "exclude_months": excl, "execution": ex,
-            "assumptions": assumptions, "window": window, "train_frac": train_frac,
+            "assumptions": assumptions, "window": window, "train_frac": train_frac, "report": report,
             "start_date": cfg.get("start_date"), "end_date": cfg.get("end_date")}
 
 
@@ -1328,32 +1407,38 @@ def _to_csv(df, path, date_cols=()):
     df.to_csv(path, index=False, encoding="utf-8", lineterminator="\n")
 
 
-def replay(config_path, out_dir):
-    """研究配置 + 快照 → 合约映射/换月 → 研究序列统计证据 → 整手真实合约回测 → 报告与产物。
-    run_id 只由 配置/快照/脚本 的内容哈希决定：输入不变 → run_id 与全部产物不变。"""
-    cfg = load_config(config_path)
-    out_dir = Path(out_dir)
-    snap_path = cfg["path"].parent / cfg["snapshot"]
-    snap = _read_json(snap_path, "snapshot")
-    data = load_snapshot(snap)
-    legs = cfg["legs"]
-    a, b = legs[0]["name"], legs[1]["name"]
+ROLLING_WINDOW = 120
 
-    tabs = fx.bar_tables(data["fut_daily"])
-    for leg in legs:
-        if leg["select"] == "fixed" and leg["ts_code"] not in tabs["close"].columns:
-            raise ReplayInputError(f"snapshot has no rows for {leg['ts_code']}; available: "
-                                   f"{sorted(tabs['close'].columns)[:20]}")
-    mapping, rolls = fx.build_mapping(tabs, legs, cfg["exclude_months"])
+
+def rolling_stability(research, window=ROLLING_WINDOW, step=5):
+    """滚动诊断：每隔 step 天，用过去 window 天的研究序列估 OLS β、价差半衰期、ADF p（只看过去，仅作诊断）。"""
+    a, b = research.columns
+    rows, idx = [], []
+    for end in range(window, len(research) + 1, step):
+        w = research.iloc[end - window:end]
+        beta = float(np.polyfit(w[b], w[a], 1)[0])
+        sp = w[a] - beta * w[b]
+        rows.append((beta, float(half_life(sp)), adf_test(sp)[1]))
+        idx.append(research.index[end - 1])
+    return pd.DataFrame(rows, index=pd.DatetimeIndex(idx), columns=["beta", "half_life", "adf_p"])
+
+
+def _core(tabs, data, cfg, exclude=None, train_frac=None, ex=None):
+    """映射/换月 → 研究序列统计证据 → 整手真实合约回测（含压力情景）。replay 与敏感性分析共用。"""
+    legs = cfg["legs"]
+    exclude = cfg["exclude_months"] if exclude is None else exclude
+    train_frac = train_frac or cfg["train_frac"]
+    ex = ex or cfg["execution"]
+    a, b = legs[0]["name"], legs[1]["name"]
+    mapping, rolls = fx.build_mapping(tabs, legs, exclude)
     research = fx.research_prices(tabs, mapping).dropna()
     if len(research) < 60:
         raise ReplayInputError(f"legs {[a, b]} share only {len(research)} usable dates in snapshot; need ≥60")
     mapping = mapping.loc[research.index[0]:research.index[-1]]
-    ex = cfg["execution"]
     make_specs = lambda fee_mult: fx.ContractSpecs(data["fut_basic"], cfg["assumptions"], fee_mult,
                                                    ex["broker_margin_add"])
     specs = make_specs(ex["broker_fee_multiplier"])
-    split_i = int(len(research) * cfg["train_frac"])
+    split_i = int(len(research) * train_frac)
     split_date, train_end = research.index[split_i], research.index[split_i - 1]
     research_legs = {}
     for n in (a, b):            # 研究口径近似成本：取训练窗最后一日的合约参数（不看样本外）
@@ -1363,13 +1448,200 @@ def replay(config_path, out_dir):
                             "slippage_ticks": ex["slippage_ticks"],
                             "margin_rate": max(sp["margin_long"], sp["margin_short"])}
     px = np.exp(research)
-    s = run_stats(px, research_legs, None, cfg["window"] or None, cfg["train_frac"])
-    bt = s["bt"]
+    st = run_stats(px, research_legs, None, cfg["window"] or None, train_frac)
+    bt = st["bt"]
     target = bt["pos"].reindex(mapping.index).ffill().fillna(0)
     exe = fx.executable_backtest(tabs, mapping, target, bt["beta"], specs, ex, split_date)
     stress_ex = {**ex, "slippage_ticks": ex["slippage_ticks"] + 1}     # 压力：手续费×2、滑点+1 跳
     stress = fx.executable_backtest(tabs, mapping, target, bt["beta"], make_specs(2 * ex["broker_fee_multiplier"]),
                                     stress_ex, split_date)
+    return {"a": a, "b": b, "mapping": mapping, "rolls": rolls, "research": research, "px": px,
+            "specs": specs, "make_specs": make_specs, "split_date": split_date, "s": st, "bt": bt,
+            "target": target, "exe": exe, "stress": stress, "ex": ex, "train_frac": train_frac}
+
+
+def _verdicts(core, ctx_base, cfg):
+    """统计证据 / 交易可行性结论（与报告头部一致）。"""
+    st, exe = core["s"], core["exe"]
+    sources = {}
+    for (field, src), n in core["specs"].used.items():
+        sources.setdefault(field, {})[src] = n
+    ctx = {**ctx_base, "cfg": cfg, "exe": exe, "sources": sources, "stress": core["stress"]["metrics"]}
+    flags = combine_flags(robustness_flags(st["adf_tr"][1], st["kpss_tr"][1], st["hl_tr"], core["bt"], st["betastab"]),
+                          futures_flags(st, ctx))
+    return _stat_tradable(st), _exe_ok(exe["metrics"].get("oos", {}), flags), flags
+
+
+def sensitivity(tabs, data, cfg, base, ctx_base):
+    """同一快照下改一项参数重跑，看结论（统计证据/交易可行性）与样本外盈亏方向是否翻转。"""
+    ex = cfg["execution"]
+    rolls_apply = any(leg["select"] != "fixed" for leg in cfg["legs"])
+    # (名称, 参数, 不适用原因：与基准相同或对本配置不起作用)
+    variants = [("手续费×2", {"ex": {**ex, "broker_fee_multiplier": 2 * ex["broker_fee_multiplier"]}}, None),
+                ("滑点+1跳", {"ex": {**ex, "slippage_ticks": ex["slippage_ticks"] + 1}}, None),
+                ("训练窗60%", {"train_frac": 0.6}, "与基准相同" if cfg["train_frac"] == 0.6 else None),
+                ("训练窗80%", {"train_frac": 0.8}, "与基准相同" if cfg["train_frac"] == 0.8 else None),
+                ("A腿20手", {"ex": {**ex, "base_lots": 20}}, "与基准相同" if ex["base_lots"] == 20 else None),
+                (f"交割前{cfg['exclude_months'] + 1}个月换出", {"exclude": cfg["exclude_months"] + 1},
+                 None if rolls_apply else "固定合约不换月，此项不起作用")]
+    rows = []
+    b_stat, b_exe, b_flags = _verdicts(base, ctx_base, cfg)
+    for name, kw, skip in [("基准", None, None)] + variants:
+        if skip:
+            rows.append({"variant": name, "skipped": skip})
+            continue
+        try:
+            core = base if kw is None else _core(tabs, data, cfg, **kw)
+            st_ok, exe_ok, flags = (b_stat, b_exe, b_flags) if kw is None else _verdicts(core, ctx_base, cfg)
+        except Exception as e:           # 诊断性重跑失败只记录，不影响主结论
+            rows.append({"variant": name, "error": f"{type(e).__name__}: {e}"})
+            continue
+        oos = core["exe"]["metrics"].get("oos", {})
+        sign = int(np.sign(oos.get("net") or 0))
+        rows.append({"variant": name, "stat_ok": st_ok, "exe_ok": exe_ok, "eg_p": core["s"]["eg"][1],
+                     "oos_net": oos.get("net"), "oos_sign": sign, "oos_t": oos.get("t"),
+                     "round_trips": oos.get("round_trips"), "top_flag": f"{flags[0][0]} {flags[0][1]}"})
+    base_key = (rows[0].get("stat_ok"), rows[0].get("exe_ok"), rows[0].get("oos_sign"))
+    for r in rows:
+        if "stat_ok" in r:
+            r["same_as_base"] = (r["stat_ok"], r["exe_ok"], r["oos_sign"]) == base_key
+    return rows
+
+
+def _reconcile(out_dir, tabs, specs, ex, fitted, stats, metrics, dates):
+    """从输出 CSV 独立复算，核对报告数字是否自洽。返回 [{check, ok, detail}]。
+    注意：手续费/滑点/盯市公式与回测引擎相同，核对的是“产物与报告一致、可由产物复算”，
+    不能发现两处共同的公式错误（公式本身由 tests/test_executable.py 的手算用例校验）。"""
+    out_dir = Path(out_dir)
+    daily = pd.read_csv(out_dir / "daily.csv", parse_dates=["date"])
+    trades = pd.read_csv(out_dir / "trades.csv", parse_dates=["date", "signal_date"])
+    rolls = pd.read_csv(out_dir / "rolls.csv", parse_dates=["date", "decided_on"])
+    mapping = pd.read_csv(out_dir / "mapping.csv", parse_dates=["date"]).set_index("date")
+    checks = []
+
+    def add(name, ok, detail):
+        checks.append({"check": name, "ok": bool(ok), "detail": detail})
+
+    close = lambda x, y: abs(x - y) <= 1e-6 * max(1.0, abs(x), abs(y))
+    parts = daily.gross - daily.fees - daily.slippage - daily.funding
+    add("净PnL勾稽", np.allclose(parts, daily.net) and close(trades.fee.sum(), daily.fees.sum())
+        and close(trades.slippage.sum(), daily.slippage.sum()),
+        f"逐日 净=毛−手续费−滑点−资金成本；成交手续费合计 {trades.fee.sum():,.2f} vs 逐日 {daily.fees.sum():,.2f}")
+    split = pd.Timestamp(fitted["split_date"])
+    windows = {"is": daily[daily.date < split], "oos": daily[daily.date >= split], "all": daily}
+    sums = {k: float(w.net.sum()) for k, w in windows.items()}
+    add("区间净PnL与报告一致", all(close(sums[k], (metrics.get(k) or {}).get("net", 0.0)) for k in sums),
+        "daily.csv 合计 样本内 {is:,.0f} / 样本外 {oos:,.0f} / 全样本 {all:,.0f} 与报告相同".format(**sums))
+    bad_fee = bad_slip = 0
+    for t in trades.itertuples():
+        sp = specs.spec(t.ts_code, t.date)
+        fee = abs(t.lots) * (t.price * sp["multiplier"] * sp["fee_rate"] + sp["fee_per_lot"])
+        ticks = ex["slippage_ticks"] + (ex.get("roll_slippage_ticks", 0) if t.reason == "roll" else 0)
+        bad_fee += not close(fee, t.fee)
+        bad_slip += not close(abs(t.lots) * ticks * sp["price_tick"] * sp["multiplier"], t.slippage)
+    add("手续费复算", bad_fee == 0, f"{len(trades)} 笔按 手数×(价格×乘数×费率+每手费) 复算，不一致 {bad_fee} 笔")
+    add("滑点复算", bad_slip == 0, f"{len(trades)} 笔按 手数×跳数×最小变动价位×乘数 复算，不一致 {bad_slip} 笔")
+    mark = tabs[ex["mark_price"]].ffill()
+    pos, gross, prev = {}, [], None
+    by_day = {d: g for d, g in trades.groupby("date")}
+    for d in daily.date:
+        g = 0.0
+        for c, h in pos.items():
+            g += h * (mark.at[d, c] - mark.at[prev, c]) * specs.spec(c, d)["multiplier"]
+        for t in by_day.get(d, pd.DataFrame()).itertuples():
+            g += t.lots * (mark.at[d, t.ts_code] - t.price) * specs.spec(t.ts_code, d)["multiplier"]
+            pos[t.ts_code] = pos.get(t.ts_code, 0) + t.lots
+        pos = {c: h for c, h in pos.items() if h}
+        gross.append(g)
+        prev = d
+    add("毛PnL复算", np.allclose(gross, daily.gross, equal_nan=True), f"由成交 + {ex['mark_price']} 盯市独立复算逐日毛盈亏，"
+        f"合计 {sum(gross):,.2f} vs 报告 {daily.gross.sum():,.2f}")
+    pos_of = {d: i for i, d in enumerate(dates)}
+    bad_roll = [r for r in rolls.itertuples()
+                if pos_of.get(r.decided_on, -9) != pos_of.get(r.date, -1) - 1
+                or (r.date in mapping.index and mapping.at[r.date, r.leg] != r.to_code)]
+    add("换月决策日", not bad_roll, f"{len(rolls)} 次换月均由前一交易日信息决定且与 mapping.csv 一致"
+        if not bad_roll else f"{len(bad_roll)} 次换月不一致")
+    a, b = [c[:-len("_research_logp")] for c in mapping.columns if c.endswith("_research_logp")]
+    train = mapping[mapping.index < pd.Timestamp(fitted["split_date"])][[f"{a}_research_logp", f"{b}_research_logp"]].dropna()
+    beta = float(np.polyfit(train.iloc[:, 1], train.iloc[:, 0], 1)[0])
+    add("训练窗β复算", close(beta, fitted["beta"]), f"mapping.csv 训练窗 {len(train)} 天 OLS β={beta:.6f} vs 报告 {fitted['beta']:.6f}")
+    p = eg_test(train.iloc[:, 0], train.iloc[:, 1])[1]
+    add("训练窗EG复算", close(p, stats["eg_p"]), f"EG 协整 p={p:.6f} vs 报告 {stats['eg_p']:.6f}")
+    spread = train.iloc[:, 0] - fitted["beta"] * train.iloc[:, 1]
+    hl, adf_p, kpss_p = half_life(spread), adf_test(spread)[1], kpss_test(spread)[1]
+    ok = (close(hl, stats["hl"]) if np.isfinite(hl) else not np.isfinite(stats["hl"])) and \
+        close(adf_p, stats["adf_p"]) and close(kpss_p, stats["kpss_p"])
+    add("训练窗半衰期/ADF/KPSS复算", ok, f"半衰期 {hl:.2f} 天、ADF p={adf_p:.4f}、KPSS p={kpss_p:.4f}，与报告相同"
+        if ok else f"复算 半衰期 {hl:.2f}/ADF {adf_p:.4f}/KPSS {kpss_p:.4f} vs 报告 "
+                   f"{stats['hl']:.2f}/{stats['adf_p']:.4f}/{stats['kpss_p']:.4f}")
+    return checks
+
+
+def reconcile_run(config_path, out_dir):
+    """对已完成的回放目录重新对账（读快照、配置与 manifest.json）。"""
+    cfg = load_config(config_path)
+    data = load_snapshot(_read_json(cfg["path"].parent / cfg["snapshot"], "snapshot"))
+    tabs = fx.bar_tables(data["fut_daily"])
+    man = _read_json(Path(out_dir) / "manifest.json", "manifest")
+    ex = cfg["execution"]
+    specs = fx.ContractSpecs(data["fut_basic"], cfg["assumptions"], ex["broker_fee_multiplier"], ex["broker_margin_add"])
+    st = man["metrics"]["statistical"]
+    stats = {"eg_p": st["eg_p"], "adf_p": st["adf_train_p"], "kpss_p": st["kpss_train_p"],
+             "hl": float(man["fitted"]["hl_train"])}
+    return _reconcile(out_dir, tabs, specs, ex, man["fitted"], stats, man["metrics"]["executable"],
+                      list(tabs["oi"].index))
+
+
+_HTML_CSS = """
+:root { color-scheme: light; }
+body { margin: 0; background: #f9f9f7; color: #0b0b0b; font: 15px/1.6 system-ui, -apple-system, "Segoe UI",
+       "Microsoft YaHei", "PingFang SC", sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; background: #fcfcfb; }
+h1 { font-size: 26px; margin: 8px 0 12px; }
+h2 { font-size: 20px; margin: 36px 0 10px; border-bottom: 1px solid #e1e0d9; padding-bottom: 4px; }
+blockquote { margin: 12px 0; padding: 8px 14px; background: #f0efec; border-left: 3px solid #2a78d6; color: #52514e; }
+table { border-collapse: collapse; margin: 10px 0; font-size: 13px; display: block; overflow-x: auto; }
+th, td { border: 1px solid #e1e0d9; padding: 4px 8px; text-align: left; font-variant-numeric: tabular-nums; }
+th { background: #f0efec; } img { max-width: 100%; height: auto; display: block; margin: 8px 0; }
+code { background: #f0efec; padding: 0 4px; border-radius: 3px; }
+"""
+
+
+def to_html(md_text, out_dir, title):
+    """report.md → 自包含 report.html（图片以 base64 内嵌；不依赖 matplotlib）。"""
+    import base64, html as _html, markdown
+    body = markdown.markdown(md_text, extensions=["tables", "sane_lists"])
+
+    def embed(m):
+        f = Path(out_dir) / m.group(1)
+        return f'src="data:image/png;base64,{base64.b64encode(f.read_bytes()).decode()}"' if f.exists() else m.group(0)
+
+    body = re.sub(r'src="(figures/[^"]+\.png)"', embed, body)
+    return (f'<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f"<title>{_html.escape(title)}</title><style>{_HTML_CSS}</style></head><body><main>{body}</main></body></html>")
+
+
+def replay(config_path, out_dir):
+    """研究配置 + 快照 → 合约映射/换月 → 研究序列统计证据 → 整手真实合约回测 → 报告与产物。
+    run_id 只由 配置/快照/脚本 的内容哈希决定：输入不变 → run_id 与全部 CSV/报告正文不变。"""
+    cfg = load_config(config_path)
+    out_dir = Path(out_dir)
+    snap_path = cfg["path"].parent / cfg["snapshot"]
+    snap = _read_json(snap_path, "snapshot")
+    data = load_snapshot(snap)
+    legs = cfg["legs"]
+
+    tabs = fx.bar_tables(data["fut_daily"])
+    for leg in legs:
+        if leg["select"] == "fixed" and leg["ts_code"] not in tabs["close"].columns:
+            raise ReplayInputError(f"snapshot has no rows for {leg['ts_code']}; available: "
+                                   f"{sorted(tabs['close'].columns)[:20]}")
+    core = _core(tabs, data, cfg)
+    a, b, mapping, rolls, research, px = (core[k] for k in ("a", "b", "mapping", "rolls", "research", "px"))
+    s, bt, exe, ex, split_date, specs = (core[k] for k in ("s", "bt", "exe", "ex", "split_date", "specs"))
+    stress = core["stress"]
 
     missing = snap.get("missing_capabilities")
     if missing is None:        # v1 快照：未记录工具清单 → 从调用推断
@@ -1382,7 +1654,8 @@ def replay(config_path, out_dir):
            "exe": exe, "stress": stress["metrics"], "split_date": split_date, "research": research}
 
     snap_sha, cfg_sha = _sha256(snap_path), _sha256(cfg["path"])
-    code_sha = hashlib.sha256((_sha256(__file__) + _sha256(fx.__file__)).encode()).hexdigest()
+    code_sha = hashlib.sha256("".join(_sha256(f) for f in (__file__, fx.__file__, SKILL_DIR / "scripts" / "charts.py")
+                                      ).encode()).hexdigest()
     run_id = hashlib.sha256(f"{cfg_sha}{snap_sha}{code_sha}".encode()).hexdigest()[:16]
     ctx["run_id"], ctx["snap_sha"] = run_id, snap_sha
 
@@ -1399,16 +1672,37 @@ def replay(config_path, out_dir):
     _to_csv(exe["daily"].reset_index(), out_dir / "daily.csv", ("date",))
     _to_csv(exe["events"], out_dir / "events.csv", ("date",))
 
-    flags = combine_flags(robustness_flags(s["adf_tr"][1], s["kpss_tr"][1], s["hl_tr"], bt, s["betastab"]),
-                          futures_flags(s, ctx))
-    report = out_dir / "report.md"
-    write_report(a, b, "zeus MCP", px, s, flags, report, **futures_report_parts(a, b, s, ctx, flags))
-
-    outputs = {f: _sha256(out_dir / f) for f in
-               ("report.md", "mapping.csv", "rolls.csv", "trades.csv", "daily.csv", "events.csv")}
     fitted = {"beta": round(bt["beta"], 12), "window": bt["window"], "hl_train": round(float(s["hl_tr"]), 9),
               "entry": ENTRY, "exit": EXIT, "stop": STOP, "train_frac": cfg["train_frac"],
               "split_date": split_date.strftime("%Y-%m-%d")}
+    stats = {"eg_p": s["eg"][1], "adf_p": s["adf_tr"][1], "kpss_p": s["kpss_tr"][1], "hl": float(s["hl_tr"])}
+    checks = _reconcile(out_dir, tabs, specs, ex, fitted, stats, exe["metrics"], list(tabs["oi"].index))
+    ctx["checks"] = checks
+    ctx["sensitivity"] = sensitivity(tabs, data, cfg, core, {"missing": missing, "snap": snap}) \
+        if cfg["report"]["sensitivity"] else []
+    rolling = rolling_stability(research) if len(research) >= ROLLING_WINDOW + 10 else pd.DataFrame()
+
+    flags = combine_flags(robustness_flags(s["adf_tr"][1], s["kpss_tr"][1], s["hl_tr"], bt, s["betastab"]),
+                          futures_flags(s, ctx))
+    figures = {}
+    if cfg["report"]["charts"]:
+        import charts
+        figures = charts.render(out_dir, {
+            "z": bt["z"], "entry": ENTRY, "exit": EXIT, "stop": STOP, "split": split_date, "daily": exe["daily"],
+            "stress_daily": stress["daily"], "mapping": mapping, "rolls": rolls, "exec_close": exec_close,
+            "research": research, "metrics": exe["metrics"], "rolling": rolling, "rolling_window": ROLLING_WINDOW,
+            "end": mapping.index[-1],
+            "beta": bt["beta"]})
+    ctx["figures"] = figures
+    report = out_dir / "report.md"
+    write_report(a, b, "zeus MCP", px, s, flags, report, **futures_report_parts(a, b, s, ctx, flags))
+    (out_dir / "report.html").write_text(
+        to_html(report.read_text(encoding="utf-8"), out_dir, f"统计套利研究报告：{a} × {b}"), encoding="utf-8")
+
+    outputs = {f: _sha256(out_dir / f) for f in
+               ("report.md", "mapping.csv", "rolls.csv", "trades.csv", "daily.csv", "events.csv")}
+    # 图片与 HTML 的字节随 matplotlib 版本可能变化：单独记录哈希，不作为可复现性判据
+    fig_hashes = {f: _sha256(out_dir / f) for f in [*figures.values(), "report.html"]}
     manifest = {
         "run_id": run_id,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -1429,12 +1723,15 @@ def replay(config_path, out_dir):
                         "end": research.index[-1].strftime("%Y-%m-%d"), "n_research_days": len(research),
                         "n_rolls": len(rolls)},
         "fitted": fitted,
-        "metrics": {"statistical": {"eg_p": s["eg"][1], "adf_train_p": s["adf_tr"][1],
+        "metrics": {"statistical": {"eg_p": s["eg"][1], "adf_train_p": s["adf_tr"][1], "kpss_train_p": s["kpss_tr"][1],
                                     "seasonality_p": s["season"][1] if s["season"] else None,
                                     "oos_net_sharpe": bt["oos_net"]["sharpe"], "oos_net_t": bt["oos_net"]["t"]},
                     "executable": exe["metrics"], "stress_oos": stress["metrics"].get("oos")},
         "flags": [list(f) for f in flags],
+        "checks": checks,
+        "sensitivity": ctx["sensitivity"],
         "outputs": outputs,
+        "figures": fig_hashes,
     }
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -1449,6 +1746,7 @@ def main():
     ap.add_argument("--fetch", action="store_true",
                     help="先从 zeus MCP 取数写快照（需环境变量 ZEUS_MCP_URL，可选 ZEUS_MCP_TOKEN），再回放")
     ap.add_argument("--out-dir", default="statarb_run", help="回放输出目录")
+    ap.add_argument("--verify", metavar="OUT_DIR", help="对已有输出目录重新对账（需配合 --config）")
     ap.add_argument("--check-zeus", metavar="TS_CODE",
                     help="检查真实 zeus MCP 的工具与字段（如 RB2501.SHF），配合 --start/--end")
     ap.add_argument("--start", default="20240102")
@@ -1476,6 +1774,13 @@ def main():
             res = check_zeus(url, None, args.check_zeus, args.start, args.end, headers=headers)
             print(json.dumps(res, ensure_ascii=False, indent=2))
             raise SystemExit(0 if res["ok"] else 1)
+        if args.verify:
+            if not args.config:
+                raise SystemExit("--verify 需要同时指定 --config")
+            checks = reconcile_run(args.config, args.verify)
+            for c in checks:
+                print(f"  {'✓' if c['ok'] else '✗'} {c['check']}: {c['detail']}")
+            raise SystemExit(0 if all(c["ok"] for c in checks) else 1)
         if args.config:
             cfg = load_config(args.config) if args.fetch else None
             existing = cfg and cfg["path"].parent / cfg["snapshot"]
